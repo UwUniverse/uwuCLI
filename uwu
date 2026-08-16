@@ -139,12 +139,16 @@ global_usage() {
 用法：
   uwu                                      启动交互式向导
   uwu product migrate lineage [操作]       迁移 LineageOS 产品设备树
+  uwu vendor convert radio [选项]          将 vendor radio files 转换为 uwu_prebuilt_image
   uwu inspect elf [选项]                   检查专有 ELF 文件
 
 命令：
   product migrate lineage
       扫描、验证并转换 LineageOS 产品配置。
       操作：list、check、plan、apply。
+
+  vendor convert radio
+      将 vendor 树中自动生成的 radio files 转换为 uwu_prebuilt_image。
 
   inspect elf
       检查设备树已提取的专有 ELF 文件及其依赖和符号。
@@ -164,12 +168,16 @@ EOF
 Usage:
   uwu                                      Start the interactive wizard
   uwu product migrate lineage [ACTION]     Migrate a LineageOS product tree
+  uwu vendor convert radio [OPTIONS]       Convert vendor radio files to uwu_prebuilt_image
   uwu inspect elf [OPTIONS]                Check proprietary ELF files
 
 Commands:
   product migrate lineage
       Discover, validate, and convert LineageOS product definitions.
       Actions: list, check, plan, and apply.
+
+  vendor convert radio
+      Convert vendor auto-generated radio files to uwu_prebuilt_image.
 
   inspect elf
       Check extracted proprietary ELF files, dependencies, and symbols.
@@ -305,6 +313,10 @@ msg() {
             confirm) printf '\n%s ' "${YELLOW}${BOLD}应用这些修改？ [y/N]${RESET}" ;;
             success) printf '\n%s\n' "${GREEN}${BOLD}迁移成功${RESET}: $2" ;;
             unchanged) printf '未修改任何文件。\n' ;;
+            vendor_missing) printf '%s\n' "${YELLOW}未找到 vendor 生成目录：$2。请先运行 LineageOS 提取脚本设置 vendor tree；radio files 的转换需待 vendor tree 就绪后在 uwuAOSP 编译系统中完成。${RESET}" ;;
+            radio_confirm) printf '\n%s ' "${YELLOW}${BOLD}是否将 radio files 转换为 uwu_prebuilt_image？ [y/N]${RESET}" ;;
+            radio_none) printf '%s\n' "${CYAN}$2 中未发现需要转换的 radio files${RESET}" ;;
+            radio_success) printf '%s\n' "${GREEN}${BOLD}Radio 转换完成${RESET}: $2 个镜像" ;;
             *) printf '%s\n' "$2" ;;
         esac
     else
@@ -318,6 +330,10 @@ msg() {
             confirm) printf '\n%s ' "${YELLOW}${BOLD}Apply these changes? [y/N]${RESET}" ;;
             success) printf '\n%s\n' "${GREEN}${BOLD}Migration succeeded${RESET}: $2" ;;
             unchanged) printf 'No files were changed.\n' ;;
+            vendor_missing) printf '%s\n' "${YELLOW}Vendor generated directory not found: $2. Run the LineageOS extraction scripts to set up the vendor tree first; radio files must then be converted within the uwuAOSP build system.${RESET}" ;;
+            radio_confirm) printf '\n%s ' "${YELLOW}${BOLD}Convert radio files to uwu_prebuilt_image? [y/N]${RESET}" ;;
+            radio_none) printf '%s\n' "${CYAN}No radio files to convert in $2${RESET}" ;;
+            radio_success) printf '%s\n' "${GREEN}${BOLD}Radio migration succeeded${RESET}: $2 image(s)" ;;
             *) printf '%s\n' "$2" ;;
         esac
     fi
@@ -732,6 +748,164 @@ confirm_apply() {
     [[ "$answer" =~ ^(y|Y|yes|Yes)$ ]] || { msg unchanged; exit 0; }
 }
 
+vendor_root_from_device_dir() {
+    local device_dir="$1" relative device_vendor device_name
+    relative="${device_dir#"$SOURCE_ROOT/device/"}"
+    device_vendor="${relative%%/*}"
+    device_name="${relative#*/}"
+    printf '%s' "$SOURCE_ROOT/vendor/$device_vendor/$device_name"
+}
+
+extract_ab_ota_partitions() {
+    # Extract the partition names listed under AB_OTA_PARTITIONS in a
+    # generated BoardConfigVendor.mk file.
+    awk '/^AB_OTA_PARTITIONS/{f=1;next} f && /^[[:space:]]/{gsub(/^[[:space:]]+/,""); gsub(/[[:space:]]+\\?$/,""); if ($0!="") print; next} f{f=0}' "$1"
+}
+
+vendor_convert_radio() {
+    local device_dir="$1"
+    local vendor_root
+    vendor_root="$(vendor_root_from_device_dir "$device_dir")"
+
+    if [[ ! -d "$vendor_root" ]]; then
+        status_line '!' "$YELLOW" 'Vendor tree' 'missing'
+        msg vendor_missing "$(relative_path "$vendor_root")"
+        return 1
+    fi
+
+    local android_mk="$vendor_root/Android.mk"
+    if [[ ! -f "$android_mk" ]] || ! grep -q 'add-radio-file-sha1-checked' "$android_mk"; then
+        msg radio_none "$(relative_path "$vendor_root")"
+        return 0
+    fi
+
+    local -a radio_paths radio_sha1s radio_names ab_parts
+    local line path sha1 part
+
+    while IFS= read -r line; do
+        path="${line%%,*}"
+        sha1="${line##*,}"
+        radio_paths+=("$path")
+        radio_sha1s+=("$sha1")
+    done < <(grep -o 'add-radio-file-sha1-checked,[^)]*' "$android_mk" | sed 's/^add-radio-file-sha1-checked,//')
+
+    while IFS= read -r part; do
+        [[ -n "$part" ]] || continue
+        ab_parts+=("$part")
+    done < <(extract_ab_ota_partitions "$vendor_root/BoardConfigVendor.mk")
+
+    local i n="${#radio_paths[@]}"
+    for (( i = 0; i < n; i++ )); do
+        local name=""
+        if (( i < ${#ab_parts[@]} )); then
+            name="${ab_parts[$i]}"
+        fi
+        [[ -n "$name" ]] || name="$(basename "${radio_paths[$i]}" .img)"
+        radio_names+=("$name")
+    done
+
+    if (( n == 0 )); then
+        msg radio_none "$(relative_path "$vendor_root")"
+        return 0
+    fi
+
+    local radio_bp="$vendor_root/radio/Android.bp"
+    mkdir -p -- "$(dirname -- "$radio_bp")"
+    {
+        printf '//\n// Automatically generated file. DO NOT MODIFY\n//\n\n'
+        for (( i = 0; i < n; i++ )); do
+            printf 'uwu_prebuilt_image {\n    name: "%s",\n    src: "%s",\n    sha1: "%s",\n}\n\n' \
+                "${radio_names[$i]}" "$(basename "${radio_paths[$i]}")" "${radio_sha1s[$i]}"
+        done
+    } > "$radio_bp"
+
+    {
+        printf '\nAB_OTA_RADIO_PARTITIONS += \\\n'
+        for (( i = 0; i < n; i++ )); do
+            if (( i == n - 1 )); then
+                printf '    %s\n' "${radio_names[$i]}"
+            else
+                printf '    %s \\\n' "${radio_names[$i]}"
+            fi
+        done
+    } >> "$vendor_root/BoardConfigVendor.mk"
+
+    local vendor_mk="$vendor_root/$(basename -- "$device_dir")-vendor.mk"
+    if [[ -f "$vendor_mk" ]]; then
+        {
+            printf '\nPRODUCT_PACKAGES += \\\n'
+            for (( i = 0; i < n; i++ )); do
+                if (( i == n - 1 )); then
+                    printf '    %s\n' "${radio_names[$i]}"
+                else
+                    printf '    %s \\\n' "${radio_names[$i]}"
+                fi
+            done
+        } >> "$vendor_mk"
+    fi
+
+    rm -f -- "$android_mk"
+
+    status_line '✓' "$GREEN" 'Radio' "$n image(s) -> uwu_prebuilt_image"
+    return 0
+}
+
+radio_usage() {
+    [[ -n "$LANGUAGE" ]] || LANGUAGE=en
+    print_banner migration
+    if [[ "$LANGUAGE" == zh ]]; then
+        cat <<'EOF'
+uwu vendor convert radio - 将 vendor 树中的 radio files 转换为 uwu_prebuilt_image
+
+用法：
+  uwu vendor convert radio [--device NAME | --product-file PATH] [--yes] [--non-interactive]
+
+选项：
+  --device NAME                 选择设备代号
+  --product-file PATH           显式指定 lineage 产品文件
+  --yes                         跳过确认
+  --non-interactive             禁止读取交互输入
+  -h, --help                    显示帮助
+EOF
+    else
+        cat <<'EOF'
+uwu vendor convert radio - Convert vendor radio files to uwu_prebuilt_image
+
+Usage:
+  uwu vendor convert radio [--device NAME | --product-file PATH] [--yes] [--non-interactive]
+
+Options:
+  --device NAME                 Select a device codename
+  --product-file PATH           Select a lineage product file explicitly
+  --yes                         Do not ask for confirmation
+  --non-interactive             Fail instead of reading stdin
+  -h, --help                    Show this help
+EOF
+    fi
+}
+
+vendor_convert_radio_main() {
+    local device_dir
+    while (( $# )); do
+        case "$1" in
+            --device) [[ $# -ge 2 ]] || die "--device requires a value" 2; DEVICE="$2"; shift 2 ;;
+            --product-file) [[ $# -ge 2 ]] || die "--product-file requires a value" 2; PRODUCT_FILE="$2"; shift 2 ;;
+            --yes) YES=true; shift ;;
+            --non-interactive) NON_INTERACTIVE=true; shift ;;
+            -h|--help) radio_usage; return 0 ;;
+            *) die "Unknown option: $1" 2 ;;
+        esac
+    done
+    require_source_tree
+    step 'Scanning product trees'
+    find_candidates
+    step 'Selecting product tree'
+    select_product
+    device_dir="$(dirname -- "$SELECTED_PRODUCT_FILE")"
+    step 'Converting radio files'
+    vendor_convert_radio "$device_dir"
+}
+
 cleanup() {
     [[ -z "${PRODUCT_TMP:-}" ]] || rm -f -- "$PRODUCT_TMP"
     [[ -z "${ANDROID_PRODUCTS_TMP:-}" ]] || rm -f -- "$ANDROID_PRODUCTS_TMP"
@@ -798,6 +972,22 @@ main() {
     apply_plan
     status_line '✓' "$GREEN" 'Files changed' '2'
     msg success "$(relative_path "$UWU_PRODUCT_FILE")"
+
+    step 'Vendor radio migration'
+    local vendor_root answer
+    vendor_root="$(vendor_root_from_device_dir "$DEVICE_DIR")"
+    if [[ ! -d "$vendor_root" ]]; then
+        msg vendor_missing "$(relative_path "$vendor_root")"
+    elif $YES; then
+        vendor_convert_radio "$DEVICE_DIR"
+    elif ! $NON_INTERACTIVE; then
+        msg radio_confirm
+        read -r answer || die "No input received."
+        if [[ "$answer" =~ ^(y|Y|yes|Yes)$ ]]; then
+            vendor_convert_radio "$DEVICE_DIR"
+        fi
+    fi
+
     printf 'Next step: lunch %s-cp2a-userdebug\n' "$UWU_PRODUCT"
 }
 
@@ -824,6 +1014,9 @@ fi
 if [[ $# -ge 2 && "$1" == inspect && "$2" == elf ]]; then
     shift 2
     inspect_elf "$@"
+elif [[ $# -ge 3 && "$1" == vendor && "$2" == convert && "$3" == radio ]]; then
+    shift 3
+    vendor_convert_radio_main "$@"
 elif [[ $# -eq 0 ]]; then
     [[ -n "$LANGUAGE" ]] || choose_language
     if choose_main_action; then
