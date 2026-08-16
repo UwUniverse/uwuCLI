@@ -1,0 +1,839 @@
+#!/usr/bin/env bash
+
+# Copyright (C) 2026 The uwuAOSP Project
+# SPDX-License-Identifier: Apache-2.0
+
+set -Eeuo pipefail
+
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly SOURCE_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+readonly LINEAGE_COMMON_RE='^[[:space:]]*\$\(call[[:space:]]+inherit-product,[[:space:]]*vendor/lineage/config/common[^[:space:])]*\.mk[[:space:]]*\)[[:space:]]*(#.*)?$'
+
+LANGUAGE="${UWU_LANG:-}"
+FORMAT="text"
+DEVICE=""
+PRODUCT_FILE=""
+DEVICE_TYPE=""
+SUPPORTS_TELEPHONY=""
+NON_INTERACTIVE=false
+YES=false
+DRY_RUN=false
+
+COLOR=false
+TRUECOLOR=false
+if [[ -t 1 && -z "${NO_COLOR:-}" && "${UWU_NO_COLOR:-false}" != true && "${TERM:-dumb}" != dumb ]]; then
+    COLOR=true
+fi
+if $COLOR && [[ "${COLORTERM:-}" == truecolor || "${COLORTERM:-}" == 24bit || "${TERM:-}" == *direct* ]]; then
+    TRUECOLOR=true
+fi
+
+if $COLOR; then
+    readonly RESET=$'\033[0m'
+    readonly DIM=$'\033[2m'
+    readonly BOLD=$'\033[1m'
+    readonly CYAN=$'\033[36m'
+    readonly BLUE=$'\033[34m'
+    readonly GREEN=$'\033[32m'
+    readonly YELLOW=$'\033[33m'
+    readonly RED=$'\033[31m'
+else
+    readonly RESET=""
+    readonly DIM=""
+    readonly BOLD=""
+    readonly CYAN=""
+    readonly BLUE=""
+    readonly GREEN=""
+    readonly YELLOW=""
+    readonly RED=""
+fi
+
+if $TRUECOLOR; then
+    readonly BRAND_1=$'\033[38;2;141;227;253m'
+    readonly BRAND_2=$'\033[38;2;146;216;252m'
+    readonly BRAND_3=$'\033[38;2;151;206;251m'
+    readonly BRAND_4=$'\033[38;2;155;195;251m'
+    readonly BRAND_5=$'\033[38;2;166;203;252m'
+    readonly BRAND_6=$'\033[38;2;177;211;252m'
+    readonly BRAND_7=$'\033[38;2;188;219;253m'
+else
+    readonly BRAND_1=""
+    readonly BRAND_2=""
+    readonly BRAND_3=""
+    readonly BRAND_4=""
+    readonly BRAND_5=""
+    readonly BRAND_6=""
+    readonly BRAND_7=""
+fi
+
+declare -a CANDIDATES=()
+declare -a SKIPPED=()
+
+print_banner() {
+    [[ "$FORMAT" == text ]] || return 0
+    local title="Product migration"
+    local description="Convert a LineageOS product tree into an uwuAOSP device tree"
+    case "${1:-migration}" in
+        cli)
+            title="Developer toolkit"
+            description="Tools for uwuAOSP device bring-up and development"
+            ;;
+        elf)
+            title="ELF inspection"
+            description="Check extracted proprietary ELF files without running Soong or Ninja"
+            ;;
+    esac
+    if [[ "$LANGUAGE" == zh ]]; then
+        case "${1:-migration}" in
+            cli) title="开发者工具"; description="用于 uwuAOSP 设备适配与开发的工具集" ;;
+            elf) title="ELF 检查"; description="无需运行 Soong 或 Ninja 即可检查已提取的专有 ELF 文件" ;;
+            *) title="产品迁移"; description="将 LineageOS 产品设备树转换为 uwuAOSP 设备树" ;;
+        esac
+    fi
+    printf '\n  '
+    if $TRUECOLOR; then
+        printf '%s%su' "$BRAND_1" "$BOLD"
+        printf '%s%sw' "$BRAND_2" "$BOLD"
+        printf '%s%su' "$BRAND_3" "$BOLD"
+        printf '%s%sA' "$BRAND_4" "$BOLD"
+        printf '%s%sO' "$BRAND_5" "$BOLD"
+        printf '%s%sS' "$BRAND_6" "$BOLD"
+        printf '%s%sP%s\n' "$BRAND_7" "$BOLD" "$RESET"
+    else
+        printf '%suwuAOSP%s\n' "${CYAN}${BOLD}" "$RESET"
+    fi
+    printf '%s\n' "${BOLD}  $title${RESET}"
+    printf '%s\n' "${DIM}  $description${RESET}"
+    printf '%s\n\n' "${DIM}  source: $(basename "$SOURCE_ROOT")${RESET}"
+}
+
+step() {
+    [[ "$FORMAT" == text ]] || return 0
+    printf '%s %s\n' "${BLUE}${BOLD}==>${RESET}" "$1"
+}
+
+section() {
+    [[ "$FORMAT" == text ]] || return 0
+    printf '\n%s\n' "${BOLD}$1${RESET}"
+    printf '%s\n' "${DIM}$(printf '%*s' "${#1}" '' | tr ' ' '-')${RESET}"
+}
+
+status_line() {
+    [[ "$FORMAT" == text ]] || return 0
+    local icon="$1" color="$2" label="$3"
+    shift 3
+    case "$icon" in
+        '✓') icon='[ok]' ;;
+        '!') icon='[!]' ;;
+        '→') icon='->' ;;
+        '•') icon='*' ;;
+    esac
+    printf '  %s%s%s %-15s%s %s\n' "$color" "$icon" "$RESET" "$label" "$RESET" "$*"
+}
+
+global_usage() {
+    [[ -n "$LANGUAGE" ]] || LANGUAGE=en
+    print_banner cli
+    if [[ "$LANGUAGE" == zh ]]; then
+        cat <<'EOF'
+用法：
+  uwu                                      启动交互式向导
+  uwu product migrate lineage [操作]       迁移 LineageOS 产品设备树
+  uwu inspect elf [选项]                   检查专有 ELF 文件
+
+命令：
+  product migrate lineage
+      扫描、验证并转换 LineageOS 产品配置。
+      操作：list、check、plan、apply。
+
+  inspect elf
+      检查设备树已提取的专有 ELF 文件及其依赖和符号。
+
+全局选项：
+  --language LANGUAGE        设置语言：en 或 zh
+  -h, --help                 显示帮助
+
+示例：
+  uwu
+  uwu --language zh
+  uwu product migrate lineage plan --device fajita --type phone --telephony
+  uwu inspect elf --device fajita --jobs 4 --incremental
+EOF
+    else
+        cat <<'EOF'
+Usage:
+  uwu                                      Start the interactive wizard
+  uwu product migrate lineage [ACTION]     Migrate a LineageOS product tree
+  uwu inspect elf [OPTIONS]                Check proprietary ELF files
+
+Commands:
+  product migrate lineage
+      Discover, validate, and convert LineageOS product definitions.
+      Actions: list, check, plan, and apply.
+
+  inspect elf
+      Check extracted proprietary ELF files, dependencies, and symbols.
+
+Global options:
+  --language LANGUAGE        Set the language to en or zh
+  -h, --help                 Show this help
+
+Examples:
+  uwu
+  uwu --language zh
+  uwu product migrate lineage plan --device fajita --type phone --telephony
+  uwu inspect elf --device fajita --jobs 4 --incremental
+EOF
+    fi
+}
+
+product_usage() {
+    [[ -n "$LANGUAGE" ]] || LANGUAGE=en
+    print_banner migration
+    if [[ "$LANGUAGE" == zh ]]; then
+        cat <<'EOF'
+uwu product migrate lineage - 将 LineageOS 产品设备树转换为 uwuAOSP
+
+用法：
+  uwu product migrate lineage [list]
+  uwu product migrate lineage check [选项]
+  uwu product migrate lineage plan [选项]
+  uwu product migrate lineage apply [选项]
+
+选项：
+  --device NAME                 选择设备代号
+  --product-file PATH           显式指定 lineage 产品文件
+  --type TYPE                   phone、tablet 或 foldable
+  --telephony                   启用移动数据支持
+  --no-telephony                禁用移动数据支持
+  --dry-run                     不修改文件
+  --yes                         跳过确认
+  --non-interactive             禁止读取交互输入，缺少参数时失败
+  --format FORMAT               text 或 json
+  -h, --help                    显示帮助
+
+示例：
+  uwu product migrate lineage list
+  uwu product migrate lineage plan --device fajita --type phone --telephony
+  uwu product migrate lineage apply --device fajita --type phone --no-telephony
+EOF
+    else
+        cat <<'EOF'
+uwu product migrate lineage - Convert a LineageOS product tree to uwuAOSP
+
+Usage:
+  uwu product migrate lineage [list]
+  uwu product migrate lineage check [options]
+  uwu product migrate lineage plan [options]
+  uwu product migrate lineage apply [options]
+
+Options:
+  --device NAME                 Select a device codename
+  --product-file PATH           Select a lineage product file explicitly
+  --type TYPE                   phone, tablet, or foldable
+  --telephony                   Enable mobile-data support
+  --no-telephony                Disable mobile-data support
+  --dry-run                     Do not modify files
+  --yes                         Do not ask for confirmation
+  --non-interactive             Fail instead of reading stdin
+  --format FORMAT               text or json
+  -h, --help                   Show this help
+
+Examples:
+  uwu product migrate lineage list
+  uwu product migrate lineage plan --device foo --type phone --telephony
+  uwu product migrate lineage apply --device foo --type phone --no-telephony
+EOF
+    fi
+}
+
+elf_usage() {
+    [[ -n "$LANGUAGE" ]] || LANGUAGE=en
+    print_banner elf
+    if [[ "$LANGUAGE" == zh ]]; then
+        cat <<'EOF'
+uwu inspect elf - 检查已提取的专有 ELF 文件
+
+用法：
+  uwu inspect elf
+  uwu inspect elf --device NAME
+  uwu inspect elf --device-dir PATH
+
+选项：
+  --device NAME                 选择设备代号
+  --device-dir PATH             选择设备树目录
+  --product NAME                覆盖自动推导的产品输出目录
+  -j, --jobs N                  并行检查任务数
+  --fail-fast                   首次失败后立即停止
+  --incremental                 跳过未变化且上次成功的文件
+  --non-interactive             禁止读取交互输入
+  --no-banner                   不显示 UwU banner
+  -h, --help                    显示帮助
+EOF
+    else
+        cat <<'EOF'
+uwu inspect elf - Check extracted proprietary ELF files
+
+Usage:
+  uwu inspect elf
+  uwu inspect elf --device NAME
+  uwu inspect elf --device-dir PATH
+
+Options:
+  --device NAME                 Select a device codename
+  --device-dir PATH             Select a device tree directory
+  --product NAME                Override inferred product output
+  -j, --jobs N                  Number of parallel checks
+  --fail-fast                   Stop at the first failure
+  --incremental                 Skip unchanged successful files
+  --non-interactive             Fail instead of reading stdin
+  --no-banner                   Do not print the UwU banner
+  -h, --help                    Show this help
+EOF
+    fi
+}
+
+msg() {
+    if [[ "$LANGUAGE" == "zh" ]]; then
+        case "$1" in
+            found) printf '%s\n' "${CYAN}找到 $2 个可转换产品设备树${RESET}" ;;
+            no_candidates) printf '未找到可转换的 LineageOS 产品设备树。\n' ;;
+            select) printf '%s\n' "${BOLD}选择产品设备树：${RESET}" ;;
+            type) printf '设备类型（phone/tablet/foldable）：' ;;
+            telephony) printf '是否支持移动数据？[y/N]：' ;;
+            plan) section '迁移计划' ;;
+            confirm) printf '\n%s ' "${YELLOW}${BOLD}应用这些修改？ [y/N]${RESET}" ;;
+            success) printf '\n%s\n' "${GREEN}${BOLD}迁移成功${RESET}: $2" ;;
+            unchanged) printf '未修改任何文件。\n' ;;
+            *) printf '%s\n' "$2" ;;
+        esac
+    else
+        case "$1" in
+            found) printf '%s\n' "${CYAN}Found $2 convertible product tree(s)${RESET}" ;;
+            no_candidates) printf 'No convertible LineageOS product tree was found.\n' ;;
+            select) printf '%s\n' "${BOLD}Select a product tree:${RESET}" ;;
+            type) printf 'Device type (phone/tablet/foldable): ' ;;
+            telephony) printf 'Does this device support mobile data? [y/N]: ' ;;
+            plan) section 'Migration plan' ;;
+            confirm) printf '\n%s ' "${YELLOW}${BOLD}Apply these changes? [y/N]${RESET}" ;;
+            success) printf '\n%s\n' "${GREEN}${BOLD}Migration succeeded${RESET}: $2" ;;
+            unchanged) printf 'No files were changed.\n' ;;
+            *) printf '%s\n' "$2" ;;
+        esac
+    fi
+}
+
+choose_main_action() {
+    local choice
+    while true; do
+        if [[ "$LANGUAGE" == zh ]]; then
+            printf '\n%s\n' "${BOLD}你想进行什么操作？${RESET}"
+            printf '  %s1%s) 改造 LineageOS 产品设备树\n' "$CYAN" "$RESET"
+            printf '  %s2%s) 检查专有 ELF 文件\n' "$CYAN" "$RESET"
+            printf '\n请选择操作：'
+        else
+            printf '\n%s\n' "${BOLD}What would you like to do?${RESET}"
+            printf '  %s1%s) Migrate a LineageOS product tree\n' "$CYAN" "$RESET"
+            printf '  %s2%s) Check proprietary ELF files\n' "$CYAN" "$RESET"
+            printf '\nSelect an action: '
+        fi
+        if ! IFS= read -r choice; then
+            die 'No input received.'
+        fi
+        case "$choice" in
+            1|migrate|migration)
+                return 0
+                ;;
+            2|elf|check)
+                return 1
+                ;;
+            *)
+                if [[ "$LANGUAGE" == zh ]]; then
+                    printf '%s\n' "${RED}选择无效，请输入 1 或 2。${RESET}" >&2
+                else
+                    printf '%s\n' "${RED}Invalid selection. Choose 1 or 2.${RESET}" >&2
+                fi
+                ;;
+        esac
+    done
+}
+
+choose_language() {
+    local choice
+    while true; do
+        printf '\n%s\n' "${BOLD}Choose a language / 选择语言${RESET}"
+        printf '  %s1%s) English\n' "$CYAN" "$RESET"
+        printf '  %s2%s) 简体中文\n' "$CYAN" "$RESET"
+        printf '\n> '
+        if ! IFS= read -r choice; then
+            die 'No input received / 未收到输入'
+        fi
+        case "$choice" in
+            1|en|English|english)
+                LANGUAGE=en
+                return
+                ;;
+            2|zh|简体中文|中文)
+                LANGUAGE=zh
+                return
+                ;;
+            *)
+                printf '%s\n' "${RED}Invalid selection / 选择无效${RESET}" >&2
+                ;;
+        esac
+    done
+}
+
+validate_language() {
+    [[ "$LANGUAGE" == en || "$LANGUAGE" == zh ]] || die "Unsupported language: $LANGUAGE" 2
+}
+
+die() {
+    printf 'Error: %s\n' "$1" >&2
+    msg unchanged >&2
+    exit "${2:-1}"
+}
+
+relative_path() { printf '%s' "${1#"$SOURCE_ROOT"/}"; }
+
+require_source_tree() {
+    [[ -f "$SOURCE_ROOT/build/envsetup.sh" && -f "$SOURCE_ROOT/vendor/uwu/config/common.mk" ]] || \
+        die "This command must run from an uwuAOSP source tree containing build/envsetup.sh and vendor/uwu/config/common.mk."
+    command -v awk >/dev/null || die "Required command not found: awk" 6
+    command -v grep >/dev/null || die "Required command not found: grep" 6
+    command -v diff >/dev/null || die "Required command not found: diff" 6
+}
+
+find_candidates() {
+    local file reason
+    CANDIDATES=()
+    SKIPPED=()
+    while IFS= read -r -d '' file; do
+        reason=""
+        if ! grep -Eq -- "$LINEAGE_COMMON_RE" "$file"; then
+            reason="missing LineageOS common configuration"
+        elif [[ ! -f "$(dirname -- "$file")/AndroidProducts.mk" ]]; then
+            reason="missing AndroidProducts.mk"
+        fi
+        if [[ -n "$reason" ]]; then
+            SKIPPED+=("$(relative_path "$file")|$reason")
+        else
+            CANDIDATES+=("$file")
+        fi
+    done < <(find "$SOURCE_ROOT/device" -mindepth 3 -maxdepth 3 -type f -name 'lineage_*.mk' -print0 2>/dev/null)
+}
+
+find_elf_device_dirs() {
+    local directory
+    CANDIDATES=()
+    while IFS= read -r -d '' directory; do
+        [[ -f "$directory/extract-files.py" &&
+           -f "$directory/AndroidProducts.mk" &&
+           -f "$directory/proprietary-files.txt" ]] || continue
+        CANDIDATES+=("$directory")
+    done < <(find "$SOURCE_ROOT/device" -mindepth 2 -maxdepth 2 -type d -print0 2>/dev/null)
+}
+
+select_elf_device() {
+    local choice index directory name
+    if [[ -n "${ELF_DEVICE_DIR:-}" ]]; then
+        [[ "$ELF_DEVICE_DIR" = /* ]] || ELF_DEVICE_DIR="$SOURCE_ROOT/$ELF_DEVICE_DIR"
+        ELF_DEVICE_DIR="$(cd -- "$ELF_DEVICE_DIR" 2>/dev/null && pwd -P)" || \
+            die "Device directory not found: ${ELF_DEVICE_DIR#"$SOURCE_ROOT"/}"
+        return
+    fi
+    if [[ -n "${ELF_DEVICE:-}" ]]; then
+        for directory in "${CANDIDATES[@]}"; do
+            name="$(basename "$directory")"
+            [[ "$name" == "$ELF_DEVICE" ]] || continue
+            if [[ -n "${ELF_DEVICE_DIR_MATCH:-}" ]]; then
+                die "Multiple device trees match '$ELF_DEVICE'; specify --device-dir."
+            fi
+            ELF_DEVICE_DIR_MATCH="$directory"
+        done
+        [[ -n "${ELF_DEVICE_DIR_MATCH:-}" ]] || die "No ELF-checkable device tree found for '$ELF_DEVICE'."
+        ELF_DEVICE_DIR="$ELF_DEVICE_DIR_MATCH"
+        return
+    fi
+    (( ${#CANDIDATES[@]} > 0 )) || die "No ELF-checkable device trees were found."
+    if (( ${#CANDIDATES[@]} == 1 )); then
+        ELF_DEVICE_DIR="${CANDIDATES[0]}"
+        return
+    fi
+    $ELF_NON_INTERACTIVE && die "Multiple device trees found; specify --device or --device-dir."
+    section 'Available device trees'
+    for index in "${!CANDIDATES[@]}"; do
+        directory="${CANDIDATES[$index]}"
+        printf '  %s%s%s  %-20s %s\n' "$CYAN" "$((index + 1))" "$RESET" \
+            "$(basename "$directory")" "${DIM}$(relative_path "$directory")${RESET}"
+    done
+    while true; do
+        printf 'Select a device: '
+        read -r choice || die "No input received."
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#CANDIDATES[@]} )); then
+            ELF_DEVICE_DIR="${CANDIDATES[$((choice - 1))]}"
+            return
+        fi
+        printf '%s\n' "${RED}Invalid selection.${RESET}" >&2
+    done
+}
+
+validate_elf_device() {
+    local relative device_vendor vendor_root
+    [[ "$ELF_DEVICE_DIR" == "$SOURCE_ROOT/device/"* ]] || \
+        die "Device directory must be inside the source tree's device/ directory."
+    [[ -f "$ELF_DEVICE_DIR/extract-files.py" ]] || die "Missing extract-files.py in $(relative_path "$ELF_DEVICE_DIR")."
+    [[ -f "$ELF_DEVICE_DIR/AndroidProducts.mk" ]] || die "Missing AndroidProducts.mk in $(relative_path "$ELF_DEVICE_DIR")."
+    [[ -f "$ELF_DEVICE_DIR/proprietary-files.txt" ]] || die "Missing proprietary-files.txt in $(relative_path "$ELF_DEVICE_DIR")."
+    relative="${ELF_DEVICE_DIR#"$SOURCE_ROOT/device/"}"
+    device_vendor="${relative%%/*}"
+    vendor_root="$SOURCE_ROOT/vendor/$device_vendor/$(basename "$ELF_DEVICE_DIR")"
+    [[ -f "$vendor_root/Android.bp" ]] || die "Missing generated file: $(relative_path "$vendor_root/Android.bp"). Run setup-makefiles.py first."
+}
+
+run_elf_check() {
+    local relative_device
+    local -a command=(python3 "$SCRIPT_DIR/standalone_check_elf.py")
+    relative_device="$(relative_path "$ELF_DEVICE_DIR")"
+    command+=("$relative_device")
+    [[ -n "${ELF_PRODUCT:-}" ]] && command+=(--product "$ELF_PRODUCT")
+    [[ -n "${ELF_JOBS:-}" ]] && command+=(--jobs "$ELF_JOBS")
+    $ELF_FAIL_FAST && command+=(--fail-fast)
+    $ELF_INCREMENTAL && command+=(--incremental)
+    $ELF_NO_BANNER && command+=(--no-banner)
+    step 'Running standalone ELF checker'
+    (cd -- "$SOURCE_ROOT" && exec "${command[@]}")
+}
+
+inspect_elf() {
+    ELF_DEVICE=""
+    ELF_DEVICE_DIR=""
+    ELF_DEVICE_DIR_MATCH=""
+    ELF_PRODUCT=""
+    ELF_JOBS=""
+    ELF_FAIL_FAST=false
+    ELF_INCREMENTAL=false
+    ELF_NON_INTERACTIVE=false
+    ELF_NO_BANNER=false
+    while (( $# )); do
+        case "$1" in
+            --device) [[ $# -ge 2 ]] || die "--device requires a value" 2; ELF_DEVICE="$2"; shift 2 ;;
+            --device-dir) [[ $# -ge 2 ]] || die "--device-dir requires a value" 2; ELF_DEVICE_DIR="$2"; shift 2 ;;
+            --product) [[ $# -ge 2 ]] || die "--product requires a value" 2; ELF_PRODUCT="$2"; shift 2 ;;
+            -j|--jobs) [[ $# -ge 2 ]] || die "--jobs requires a value" 2; ELF_JOBS="$2"; [[ "$ELF_JOBS" =~ ^[0-9]+$ && "$ELF_JOBS" -ge 1 ]] || die "--jobs must be at least 1" 2; shift 2 ;;
+            --fail-fast) ELF_FAIL_FAST=true; shift ;;
+            --incremental) ELF_INCREMENTAL=true; shift ;;
+            --non-interactive) ELF_NON_INTERACTIVE=true; shift ;;
+            --no-banner) ELF_NO_BANNER=true; shift ;;
+            -h|--help) elf_usage; return 0 ;;
+            *) die "Unknown ELF option: $1" 2 ;;
+        esac
+    done
+    require_source_tree
+    [[ -f "$SCRIPT_DIR/standalone_check_elf.py" ]] || die "Missing CLI component: $SCRIPT_DIR/standalone_check_elf.py"
+    command -v python3 >/dev/null || die "Required command not found: python3" 6
+    step 'Discovering device trees'
+    find_elf_device_dirs
+    select_elf_device
+    validate_elf_device
+    status_line '✓' "$GREEN" 'Device' "$(relative_path "$ELF_DEVICE_DIR")"
+    status_line '✓' "$GREEN" 'Prerequisites' 'passed'
+    run_elf_check
+}
+
+print_candidates() {
+    local file name item
+    if [[ "$FORMAT" == json ]]; then
+        printf '{"convertible":['
+        local first=true
+        for file in "${CANDIDATES[@]}"; do
+            name="$(basename "$file" .mk)"
+            name="${name#lineage_}"
+            $first || printf ','
+            printf '{"device":"%s","path":"%s"}' "$name" "$(relative_path "$file")"
+            first=false
+        done
+        printf '],"skipped":['
+        first=true
+        for item in "${SKIPPED[@]}"; do
+            $first || printf ','
+            printf '{"path":"%s","reason":"%s"}' "${item%%|*}" "${item#*|}"
+            first=false
+        done
+        printf ']}\n'
+        return 0
+    fi
+    section 'Available product trees'
+    msg found "${#CANDIDATES[@]}"
+    if (( ${#CANDIDATES[@]} )); then
+        printf '\n%s\n' "${GREEN}${BOLD}Convertible${RESET}"
+        for file in "${CANDIDATES[@]}"; do
+            name="$(basename "$file" .mk)"
+            name="${name#lineage_}"
+            status_line '✓' "$GREEN" "$name" "$(relative_path "$file")"
+        done
+    fi
+    if (( ${#SKIPPED[@]} )); then
+        printf '\n%s\n' "${YELLOW}${BOLD}Skipped${RESET}"
+        for item in "${SKIPPED[@]}"; do
+            status_line '!' "$YELLOW" "${item%%|*}" "${item#*|}"
+        done
+    fi
+    return 0
+}
+
+select_product() {
+    local choice index file name
+    if [[ -n "$PRODUCT_FILE" ]]; then
+        [[ "$PRODUCT_FILE" = /* ]] || PRODUCT_FILE="$SOURCE_ROOT/$PRODUCT_FILE"
+        [[ -f "$PRODUCT_FILE" ]] || die "Product file not found: $(relative_path "$PRODUCT_FILE")"
+        SELECTED_PRODUCT_FILE="$PRODUCT_FILE"
+        return
+    fi
+    if [[ -n "$DEVICE" ]]; then
+        for file in "${CANDIDATES[@]}"; do
+            name="$(basename "$file" .mk)"
+            if [[ "${name#lineage_}" == "$DEVICE" ]]; then
+                SELECTED_PRODUCT_FILE="$file"
+                return
+            fi
+        done
+        die "No convertible product tree found for device '$DEVICE'. Run 'uwu product migrate lineage list'."
+    fi
+    (( ${#CANDIDATES[@]} > 0 )) || die "No convertible product tree was found."
+    if (( ${#CANDIDATES[@]} == 1 )); then
+        SELECTED_PRODUCT_FILE="${CANDIDATES[0]}"
+        status_line '✓' "$GREEN" 'Selected' "$(relative_path "$SELECTED_PRODUCT_FILE")"
+        return
+    fi
+    $NON_INTERACTIVE && die "Multiple product trees found; specify --device or --product-file."
+    msg select
+    for index in "${!CANDIDATES[@]}"; do
+        file="${CANDIDATES[$index]}"
+        name="$(basename "$file" .mk)"
+        printf '  %s%s%s  %-20s %s\n' "$CYAN" "$((index + 1))" "$RESET" "${name#lineage_}" "${DIM}$(relative_path "$file")${RESET}"
+    done
+    while true; do
+        read -r -p '> ' choice || die "No input received."
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#CANDIDATES[@]} )); then
+            SELECTED_PRODUCT_FILE="${CANDIDATES[$((choice - 1))]}"
+            return
+        fi
+        printf 'Invalid selection.\n' >&2
+    done
+}
+
+ask_options() {
+    local answer
+    while true; do
+        if [[ -z "$DEVICE_TYPE" ]]; then
+            $NON_INTERACTIVE && die "Specify --type in non-interactive mode."
+            msg type
+            read -r DEVICE_TYPE || die "No input received."
+        fi
+        if [[ "$DEVICE_TYPE" =~ ^(phone|tablet|foldable)$ ]]; then
+            break
+        fi
+        if $NON_INTERACTIVE; then
+            die "Invalid device type '$DEVICE_TYPE'; expected phone, tablet, or foldable."
+        fi
+        printf '%s\n' "${RED}Invalid device type '$DEVICE_TYPE'. Choose phone, tablet, or foldable.${RESET}" >&2
+        DEVICE_TYPE=""
+    done
+    status_line '✓' "$GREEN" 'Device type' "$DEVICE_TYPE"
+    if [[ -z "$SUPPORTS_TELEPHONY" ]]; then
+        $NON_INTERACTIVE && die "Specify --telephony or --no-telephony in non-interactive mode."
+        msg telephony; read -r answer || die "No input received."
+        case "$answer" in y|Y|yes|Yes) SUPPORTS_TELEPHONY=true ;; *) SUPPORTS_TELEPHONY=false ;; esac
+    fi
+    status_line '✓' "$GREEN" 'Telephony' "$SUPPORTS_TELEPHONY"
+}
+
+validate_product() {
+    DEVICE_DIR="$(dirname -- "$SELECTED_PRODUCT_FILE")"
+    ANDROID_PRODUCTS_FILE="$DEVICE_DIR/AndroidProducts.mk"
+    PRODUCT_BASENAME="$(basename -- "$SELECTED_PRODUCT_FILE" .mk)"
+    PRODUCT_SUFFIX="${PRODUCT_BASENAME#lineage_}"
+    LINEAGE_PRODUCT="lineage_$PRODUCT_SUFFIX"
+    UWU_PRODUCT="uwu_$PRODUCT_SUFFIX"
+    UWU_PRODUCT_FILE="$DEVICE_DIR/$UWU_PRODUCT.mk"
+    [[ "$PRODUCT_BASENAME" == lineage_* && "$PRODUCT_SUFFIX" =~ ^[A-Za-z0-9_]+$ ]] || die "Invalid product codename: $PRODUCT_SUFFIX"
+    [[ -f "$ANDROID_PRODUCTS_FILE" ]] || die "Missing file: $(relative_path "$ANDROID_PRODUCTS_FILE")"
+    [[ ! -e "$UWU_PRODUCT_FILE" ]] || die "Target file already exists: $(relative_path "$UWU_PRODUCT_FILE")"
+    [[ "$(grep -Ec -- "$LINEAGE_COMMON_RE" "$SELECTED_PRODUCT_FILE")" == 1 ]] || die "Product file must contain exactly one LineageOS common configuration entry."
+    [[ "$(grep -Ec '^[[:space:]]*PRODUCT_NAME[[:space:]]*(:|\+|\?)?=[[:space:]]*lineage_' "$SELECTED_PRODUCT_FILE")" == 1 ]] || die "Product file must contain exactly one lineage_ PRODUCT_NAME."
+    [[ "$(grep -Fc -- "$LINEAGE_PRODUCT.mk" "$ANDROID_PRODUCTS_FILE")" == 1 ]] || die "AndroidProducts.mk must reference $LINEAGE_PRODUCT.mk exactly once."
+}
+
+make_plan() {
+    PRODUCT_TMP="$(mktemp "$DEVICE_DIR/.uwu-product.XXXXXX")"
+    ANDROID_PRODUCTS_TMP="$(mktemp "$DEVICE_DIR/.uwu-products.XXXXXX")"
+    chmod --reference="$SELECTED_PRODUCT_FILE" "$PRODUCT_TMP" "$ANDROID_PRODUCTS_TMP"
+    local common_line common_path
+    common_line="$(grep -En -- "$LINEAGE_COMMON_RE" "$SELECTED_PRODUCT_FILE" | cut -d: -f1)"
+    common_path="$(grep -Eo 'vendor/lineage/config/common[^[:space:])]*\.mk' "$SELECTED_PRODUCT_FILE" | head -n1)"
+    awk -v common_line="$common_line" -v device_type="$DEVICE_TYPE" -v telephony="$SUPPORTS_TELEPHONY" -v old="$LINEAGE_PRODUCT" -v new="$UWU_PRODUCT" '
+        NR == common_line { print "UWU_DEVICE_TYPE := " device_type; print "UWU_SUPPORTS_TELEPHONY := " telephony; print "$(call inherit-product, vendor/uwu/config/common.mk)"; next }
+        { if ($0 == "# Inherit some common LineageOS stuff.") $0 = "# Inherit some common uwuAOSP stuff."; if ($0 ~ /^[[:space:]]*PRODUCT_NAME[[:space:]]*(:|\+|\?)?=[[:space:]]*lineage_/) sub(/lineage_/, "uwu_"); gsub(old, new); print }
+    ' "$SELECTED_PRODUCT_FILE" > "$PRODUCT_TMP"
+    awk -v old="$LINEAGE_PRODUCT" -v new="$UWU_PRODUCT" '{ gsub(old "\\.mk", new ".mk"); gsub(old "-[A-Za-z0-9_.]+-userdebug", new "-cp2a-userdebug"); gsub(old "-userdebug", new "-cp2a-userdebug"); gsub(old "-[A-Za-z0-9_.]+-user", new "-cp2a-user"); gsub(old "-user", new "-cp2a-user"); gsub(old "-[A-Za-z0-9_.]+-eng", new "-cp2a-eng"); gsub(old "-eng", new "-cp2a-eng"); print }' "$ANDROID_PRODUCTS_FILE" > "$ANDROID_PRODUCTS_TMP"
+    grep -Fq '$(call inherit-product, vendor/uwu/config/common.mk)' "$PRODUCT_TMP" || die "Generated product file failed validation."
+    grep -Eq '^[[:space:]]*PRODUCT_NAME[[:space:]]*(:|\+|\?)?=[[:space:]]*uwu_' "$PRODUCT_TMP" || die "Generated PRODUCT_NAME failed validation."
+    ! grep -Fq "$LINEAGE_PRODUCT.mk" "$ANDROID_PRODUCTS_TMP" || die "Generated AndroidProducts.mk still references $LINEAGE_PRODUCT.mk."
+    grep -Fq "$UWU_PRODUCT.mk" "$ANDROID_PRODUCTS_TMP" || die "Generated AndroidProducts.mk lost the product reference."
+    LINEAGE_COMMON_PATH="$common_path"
+}
+
+print_diff() {
+    printf '\n  %s -> %s\n' "$(relative_path "$SELECTED_PRODUCT_FILE")" "$(relative_path "$UWU_PRODUCT_FILE")"
+    diff -u -- "$SELECTED_PRODUCT_FILE" "$PRODUCT_TMP" || true
+    printf '\n  %s\n' "$(relative_path "$ANDROID_PRODUCTS_FILE")"
+    diff -u -- "$ANDROID_PRODUCTS_FILE" "$ANDROID_PRODUCTS_TMP" || true
+}
+
+print_plan() {
+    msg plan
+    status_line '•' "$CYAN" 'Device' "${DEVICE:-$PRODUCT_SUFFIX}"
+    status_line '•' "$CYAN" 'Device type' "$DEVICE_TYPE"
+    status_line '•' "$CYAN" 'Telephony' "$SUPPORTS_TELEPHONY"
+    status_line '→' "$CYAN" 'Product' "$LINEAGE_PRODUCT -> $UWU_PRODUCT"
+    status_line '→' "$CYAN" 'Lunch targets' "$LINEAGE_PRODUCT -> $UWU_PRODUCT-cp2a-*"
+    status_line '→' "$CYAN" 'Common config' "$LINEAGE_COMMON_PATH -> vendor/uwu/config/common.mk"
+    section 'Changes'
+    print_diff
+}
+
+apply_plan() {
+    local product_backup products_backup
+    product_backup="$(mktemp "$DEVICE_DIR/.uwu-product-backup.XXXXXX")"
+    products_backup="$(mktemp "$DEVICE_DIR/.uwu-products-backup.XXXXXX")"
+    cp -p -- "$SELECTED_PRODUCT_FILE" "$product_backup"
+    cp -p -- "$ANDROID_PRODUCTS_FILE" "$products_backup"
+    rollback() {
+        cp -p -- "$product_backup" "$SELECTED_PRODUCT_FILE" 2>/dev/null || true
+        cp -p -- "$products_backup" "$ANDROID_PRODUCTS_FILE" 2>/dev/null || true
+        rm -f -- "$UWU_PRODUCT_FILE"
+    }
+    if ! mv -- "$PRODUCT_TMP" "$UWU_PRODUCT_FILE" || ! mv -- "$ANDROID_PRODUCTS_TMP" "$ANDROID_PRODUCTS_FILE" || ! rm -f -- "$SELECTED_PRODUCT_FILE"; then
+        rollback
+        die "Failed to apply migration; original files were restored."
+    fi
+    rm -f -- "$product_backup" "$products_backup"
+    PRODUCT_TMP=""
+    ANDROID_PRODUCTS_TMP=""
+}
+
+confirm_apply() {
+    $YES && return 0
+    $NON_INTERACTIVE && die "Use --yes with --apply in non-interactive mode."
+    msg confirm
+    local answer
+    read -r answer || die "No input received."
+    [[ "$answer" =~ ^(y|Y|yes|Yes)$ ]] || { msg unchanged; exit 0; }
+}
+
+cleanup() {
+    [[ -z "${PRODUCT_TMP:-}" ]] || rm -f -- "$PRODUCT_TMP"
+    [[ -z "${ANDROID_PRODUCTS_TMP:-}" ]] || rm -f -- "$ANDROID_PRODUCTS_TMP"
+    return 0
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+parse_options() {
+    while (( $# )); do
+        case "$1" in
+            --device) [[ $# -ge 2 ]] || die "--device requires a value" 2; DEVICE="$2"; shift 2 ;;
+            --product-file) [[ $# -ge 2 ]] || die "--product-file requires a value" 2; PRODUCT_FILE="$2"; shift 2 ;;
+            --type) [[ $# -ge 2 ]] || die "--type requires a value" 2; DEVICE_TYPE="$2"; shift 2 ;;
+            --telephony) SUPPORTS_TELEPHONY=true; shift ;;
+            --no-telephony) SUPPORTS_TELEPHONY=false; shift ;;
+            --dry-run) DRY_RUN=true; shift ;;
+            --yes) YES=true; shift ;;
+            --non-interactive) NON_INTERACTIVE=true; shift ;;
+            --format) [[ $# -ge 2 ]] || die "--format requires a value" 2; FORMAT="$2"; shift 2 ;;
+            --language) [[ $# -ge 2 ]] || die "--language requires a value" 2; LANGUAGE="$2"; shift 2 ;;
+            -h|--help) product_usage; exit 0 ;;
+            *) die "Unknown option: $1" 2 ;;
+        esac
+    done
+    [[ "$FORMAT" == text || "$FORMAT" == json ]] || die "Unsupported format: $FORMAT" 2
+    validate_language
+}
+
+main() {
+    [[ "${1:-}" == product && "${2:-}" == migrate && "${3:-}" == lineage ]] || { global_usage; exit 2; }
+    shift 3
+    local format_action="${1:-plan}"
+    if [[ "$format_action" == list || "$format_action" == check || "$format_action" == plan || "$format_action" == apply ]]; then
+        shift
+    else
+        format_action=plan
+    fi
+    parse_options "$@"
+    require_source_tree
+    print_banner
+    step 'Scanning product trees'
+    find_candidates
+    if [[ "$format_action" == list ]]; then print_candidates; exit 0; fi
+    (( ${#CANDIDATES[@]} )) || die "No convertible product tree was found. Run 'uwu product migrate lineage list'."
+    step 'Selecting product tree'
+    select_product
+    step 'Collecting device options'
+    ask_options
+    step 'Validating source files'
+    validate_product
+    status_line '✓' "$GREEN" 'Validation' 'passed'
+    step 'Preparing migration preview'
+    make_plan
+    if [[ "$FORMAT" == json ]]; then
+        printf '{"operation":"product.migrate.lineage","device":"%s","product":"%s","target":"%s","device_type":"%s","telephony":%s,"changed":true}\n' "$PRODUCT_SUFFIX" "$LINEAGE_PRODUCT" "$UWU_PRODUCT" "$DEVICE_TYPE" "$SUPPORTS_TELEPHONY"
+    else
+        print_plan
+    fi
+    [[ "$format_action" == check || "$format_action" == plan || "$DRY_RUN" == true ]] && exit 0
+    confirm_apply
+    step 'Applying migration'
+    apply_plan
+    status_line '✓' "$GREEN" 'Files changed' '2'
+    msg success "$(relative_path "$UWU_PRODUCT_FILE")"
+    printf 'Next step: lunch %s-cp2a-userdebug\n' "$UWU_PRODUCT"
+}
+
+declare -a CLI_ARGS=()
+while (( $# )); do
+    case "$1" in
+        --language)
+            [[ $# -ge 2 ]] || die "--language requires a value" 2
+            LANGUAGE="$2"
+            shift 2
+            ;;
+        *)
+            CLI_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+[[ -z "$LANGUAGE" ]] || validate_language
+set -- "${CLI_ARGS[@]}"
+if (( $# > 0 )) && [[ -z "$LANGUAGE" ]]; then
+    LANGUAGE=en
+fi
+
+if [[ $# -ge 2 && "$1" == inspect && "$2" == elf ]]; then
+    shift 2
+    inspect_elf "$@"
+elif [[ $# -eq 0 ]]; then
+    [[ -n "$LANGUAGE" ]] || choose_language
+    if choose_main_action; then
+        main product migrate lineage apply
+    else
+        inspect_elf
+    fi
+elif [[ "$1" == --help || "$1" == -h ]]; then
+    global_usage
+    exit 0
+else
+    main "$@"
+fi
