@@ -278,17 +278,33 @@ func Run(ctx context.Context, options Options) error {
 	}
 	batchSize := options.BatchSize
 
-	fmt.Printf("uni: prepare graph, -j%d\n", jobs)
-	graphArgs := prepareArgs(options, jobs)
-	if _, err := runner.runReported(ctx, report, &summary, "graph-analysis", "--uni-prepare-mode", "prepare", statePath, graphArgs, jobs); err != nil {
-		return err
-	}
-	state, err := LoadState(statePath)
+	release := os.Getenv("TARGET_RELEASE")
+	variant := os.Getenv("TARGET_BUILD_VARIANT")
+	state, reused, err := ReuseState(statePath, top, outDir, product, release, variant, options)
 	if err != nil {
-		return fmt.Errorf("load prepared graph: %w", err)
+		return fmt.Errorf("reuse prepared graph: %w", err)
 	}
-	if err := state.Validate(top, outDir, product); err != nil {
-		return fmt.Errorf("invalid prepared graph: %w", err)
+	graphArgs := prepareArgs(options, jobs)
+	if reused {
+		fmt.Printf("uni: reuse graph\n")
+		report.event("graph reused=true")
+	} else {
+		runner.disableIncrementalAnalysis()
+		fmt.Printf("uni: prepare graph, -j%d\n", jobs)
+		if _, err := runner.runReported(ctx, report, &summary, "graph-analysis", "--uni-prepare-mode", "prepare", statePath, graphArgs, jobs); err != nil {
+			return err
+		}
+		state, err = LoadState(statePath)
+		if err != nil {
+			return fmt.Errorf("load prepared graph: %w", err)
+		}
+		state, err = RecordSourceFingerprint(statePath, top, outDir, state)
+		if err != nil {
+			return fmt.Errorf("record source graph: %w", err)
+		}
+		if err := state.Validate(top, outDir, product); err != nil {
+			return fmt.Errorf("invalid prepared graph: %w", err)
+		}
 	}
 	if !options.FullBuild {
 		if options.Plan {
