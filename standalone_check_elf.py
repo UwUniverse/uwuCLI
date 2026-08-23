@@ -24,7 +24,7 @@ from pathlib import Path
 
 
 ELF_MAGIC = b"\x7fELF"
-SOURCE_TREES = ("frameworks", "hardware", "vendor", "bionic")
+SOURCE_TREES = ("bionic", "external", "frameworks", "hardware", "system", "vendor")
 SYSTEM_SHARED_LIBS = ("libc", "libm", "libdl")
 INCREMENTAL_VERSION = 2
 USE_COLOR = (
@@ -88,10 +88,15 @@ def print_report(
     checked: int,
     skipped: int,
     failures: int,
+    blocked: int,
     required_modules: set[str],
 ) -> None:
-    failed = failures > 0
-    result = f"{RED}{BOLD}FAILED{RESET}" if failed else f"{GREEN}{BOLD}PASSED{RESET}"
+    if failures:
+        result = f"{RED}{BOLD}FAILED{RESET}"
+    elif blocked:
+        result = f"{CYAN}{BOLD}INCOMPLETE{RESET}"
+    else:
+        result = f"{GREEN}{BOLD}PASSED{RESET}"
     print()
     print(f"{BOLD}ELF check report{RESET}")
     print(f"{DIM}----------------{RESET}")
@@ -99,7 +104,8 @@ def print_report(
     print(f"  Discovered      {total}")
     print(f"  Checked         {checked}")
     print(f"  Skipped         {skipped}")
-    print(f"  Failed/blocked  {failures}")
+    print(f"  Failed          {failures}")
+    print(f"  Blocked         {blocked}")
     if required_modules:
         print()
         print(f"{BOLD}Required build{RESET}")
@@ -893,7 +899,7 @@ def run_check(
     source_modules: dict[str, list[Module]],
     llvm_readobj: Path,
     previous: dict | None,
-) -> tuple[bool, bool, bool, str, CheckPlan, dict | None]:
+) -> tuple[bool, bool, bool, bool, str, CheckPlan, dict | None]:
     prop, elf, module = target
     plan = make_plan(
         top,
@@ -911,6 +917,7 @@ def run_check(
             False,
             False,
             False,
+            True,
             f"{plan.elf.path}: blocked by missing build output for "
             f"{', '.join(plan.missing_modules)}",
             plan,
@@ -921,6 +928,7 @@ def run_check(
             False,
             False,
             False,
+            False,
             "\n".join(f"{plan.elf.path}: error: {error}" for error in plan.errors),
             plan,
             None,
@@ -928,12 +936,13 @@ def run_check(
     try:
         state = plan_state(top, plan)
     except OSError as error:
-        return False, False, False, f"{plan.elf.path}: error: {error}", plan, None
+        return False, False, False, False, f"{plan.elf.path}: error: {error}", plan, None
     if previous and previous.get("success") is True and previous.get("state") == state:
         return (
             True,
             False,
             True,
+            False,
             f"Skipped unchanged elf file: {plan.prop.path}",
             plan,
             state,
@@ -941,10 +950,11 @@ def run_check(
     errors = check_plan(plan, llvm_readobj)
     if errors:
         output = "\n".join(f"{plan.elf.path}: error: {error}" for error in errors)
-        return False, True, False, output, plan, state
+        return False, True, False, False, output, plan, state
     return (
         True,
         True,
+        False,
         False,
         f"{GREEN}Successfully checked elf file: {plan.prop.path}{RESET}",
         plan,
@@ -998,6 +1008,7 @@ def main() -> int:
     early_skipped: list[PropFile] = []
     wanted_modules = set()
     failures = 0
+    blocked_count = 0
     print(
         f"[info] Analyzing {len(prebuilt_modules)} generated ELF module file(s)...",
         flush=True,
@@ -1086,7 +1097,7 @@ def main() -> int:
             )
             for target in targets
         )
-        for success, attempted, skipped, output, plan, state in results:
+        for success, attempted, skipped, blocked, output, plan, state in results:
             completed += 1
             print(
                 f"{BOLD}[{completed}/{total}]{RESET} {output}",
@@ -1105,10 +1116,11 @@ def main() -> int:
                     total,
                     checked,
                     skipped_count,
-                    1,
+                    int(not blocked),
+                    int(blocked),
                     required_modules,
                 )
-                return 1
+                return 3 if blocked else 1
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
             futures = [
@@ -1127,9 +1139,9 @@ def main() -> int:
             ]
             for future in concurrent.futures.as_completed(futures):
                 try:
-                    success, attempted, skipped, output, plan, state = future.result()
+                    success, attempted, skipped, blocked, output, plan, state = future.result()
                 except Exception as error:
-                    success, attempted, skipped = False, False, False
+                    success, attempted, skipped, blocked = False, False, False, False
                     output = f"error: {error}"
                     plan = None
                     state = None
@@ -1141,7 +1153,8 @@ def main() -> int:
                 )
                 checked += int(attempted)
                 skipped_count += int(skipped)
-                failures += int(not success)
+                blocked_count += int(blocked)
+                failures += int(not success and not blocked)
                 if plan is not None:
                     key = str(plan.elf.path.relative_to(top))
                     incremental_files[key] = {"success": success, "state": state}
@@ -1150,8 +1163,15 @@ def main() -> int:
     if args.incremental:
         save_incremental(incremental_path, incremental_files)
 
-    print_report(total, checked, skipped_count, failures, required_modules)
-    return 1 if failures else 0
+    print_report(
+        total,
+        checked,
+        skipped_count,
+        failures,
+        blocked_count,
+        required_modules,
+    )
+    return 1 if failures else 3 if blocked_count else 0
 
 
 if __name__ == "__main__":
