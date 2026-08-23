@@ -64,6 +64,35 @@ type State struct {
 	Dist              bool        `json:"dist"`
 	GraphFingerprint  string      `json:"graph_fingerprint"`
 	GraphFiles        []GraphFile `json:"graph_files"`
+	SourceFingerprint string      `json:"source_fingerprint,omitempty"`
+}
+
+func SaveState(path string, state State) error {
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0777); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".state-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0666); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func LoadState(path string) (State, error) {
@@ -114,6 +143,156 @@ func (state State) Validate(sourceRoot, outDir, product string) error {
 		return fmt.Errorf("build graph changed")
 	}
 	return nil
+}
+
+func sourceGraphFile(relative, name string) bool {
+	if name == "Android.bp" || name == "Blueprints" || strings.HasSuffix(name, ".mk") {
+		return true
+	}
+	return strings.HasPrefix(relative, "build/soong/") ||
+		strings.HasPrefix(relative, "build/blueprint/")
+}
+
+func sourceGraphFingerprint(sourceRoot, outDir string) (string, int64, error) {
+	hash := sha256.New()
+	var newest int64
+	outDir = filepath.Clean(outDir)
+	err := filepath.WalkDir(sourceRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		clean := filepath.Clean(path)
+		if entry.IsDir() {
+			if clean == outDir || entry.Name() == ".repo" || entry.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		relative, err := filepath.Rel(sourceRoot, clean)
+		if err != nil || !sourceGraphFile(filepath.ToSlash(relative), entry.Name()) {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(hash, "%s\x00%d\x00%d\n", filepath.ToSlash(relative), info.Size(), info.ModTime().UnixNano())
+		if info.ModTime().UnixNano() > newest {
+			newest = info.ModTime().UnixNano()
+		}
+		return nil
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), newest, nil
+}
+
+func (state State) validateReusableGraph(sourceRoot, outDir, product string) (int64, error) {
+	if state.Version != stateVersion {
+		return 0, fmt.Errorf("unsupported state version %d", state.Version)
+	}
+	if state.BuildDateTime == "" || state.BuildDateTimeFile == "" {
+		return 0, fmt.Errorf("state is missing build date information")
+	}
+	if filepath.Clean(state.SourceRoot) != filepath.Clean(sourceRoot) ||
+		filepath.Clean(state.OutDir) != filepath.Clean(outDir) || state.TargetProduct != product {
+		return 0, fmt.Errorf("build identity changed")
+	}
+	var oldest int64
+	for _, expected := range state.GraphFiles {
+		if filepath.Clean(expected.Path) == filepath.Clean(state.BuildDateTimeFile) {
+			continue
+		}
+		info, err := os.Stat(expected.Path)
+		if err != nil {
+			return 0, err
+		}
+		if info.Size() != expected.Size || info.ModTime().UnixNano() != expected.ModTimeNano {
+			return 0, fmt.Errorf("build graph changed")
+		}
+		if oldest == 0 || info.ModTime().UnixNano() < oldest {
+			oldest = info.ModTime().UnixNano()
+		}
+	}
+	if oldest == 0 {
+		return 0, fmt.Errorf("state has no reusable graph")
+	}
+	return oldest, nil
+}
+
+func currentNinjaTargets(options Options) []string {
+	if len(options.Targets) == 0 {
+		return []string{"droid"}
+	}
+	return append([]string(nil), options.Targets...)
+}
+
+func ReuseState(path, sourceRoot, outDir, product, release, variant string, options Options) (State, bool, error) {
+	if len(options.KeyValues) != 0 {
+		return State{}, false, nil
+	}
+	state, err := LoadState(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return State{}, false, nil
+		}
+		return State{}, false, err
+	}
+	oldest, err := state.validateReusableGraph(sourceRoot, outDir, product)
+	if err != nil || state.TargetRelease != release || state.BuildVariant != variant {
+		return State{}, false, nil
+	}
+	fingerprint, newest, err := sourceGraphFingerprint(sourceRoot, outDir)
+	if err != nil {
+		return State{}, false, err
+	}
+	if state.SourceFingerprint != "" {
+		if fingerprint != state.SourceFingerprint {
+			return State{}, false, nil
+		}
+	} else if newest > oldest {
+		return State{}, false, nil
+	}
+	buildDate := []byte(state.BuildDateTime + "\n")
+	current, readErr := os.ReadFile(state.BuildDateTimeFile)
+	if readErr != nil || !bytes.Equal(current, buildDate) {
+		if err := os.WriteFile(state.BuildDateTimeFile, buildDate, 0666); err != nil {
+			return State{}, false, err
+		}
+	}
+	state.NinjaArgs = currentNinjaTargets(options)
+	state.OriginalArgs = append([]string(nil), options.BuildArgs...)
+	state.Dist = options.Dist
+	state.SourceFingerprint = fingerprint
+	for index := range state.GraphFiles {
+		info, statErr := os.Stat(state.GraphFiles[index].Path)
+		if statErr != nil {
+			return State{}, false, statErr
+		}
+		state.GraphFiles[index].Size = info.Size()
+		state.GraphFiles[index].ModTimeNano = info.ModTime().UnixNano()
+	}
+	state.GraphFingerprint, err = graphFingerprint(state.GraphFiles)
+	if err != nil {
+		return State{}, false, err
+	}
+	if err := SaveState(path, state); err != nil {
+		return State{}, false, err
+	}
+	return state, true, nil
+}
+
+func RecordSourceFingerprint(path, sourceRoot, outDir string, state State) (State, error) {
+	fingerprint, _, err := sourceGraphFingerprint(sourceRoot, outDir)
+	if err != nil {
+		return State{}, err
+	}
+	state.SourceFingerprint = fingerprint
+	if err := SaveState(path, state); err != nil {
+		return State{}, err
+	}
+	return state, nil
 }
 
 func ProductTargets(state State) []string {

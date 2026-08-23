@@ -162,6 +162,11 @@ func newCommandRunner(ctx context.Context, top string, keyValues []string) (*com
 	return runner, nil
 }
 
+func (runner *commandRunner) disableIncrementalAnalysis() {
+	runner.baseEnv = overrideEnvironment(runner.baseEnv, "SOONG_INCREMENTAL_ANALYSIS=false")
+	runner.incrementalAnalysis = false
+}
+
 func (runner *commandRunner) runReported(ctx context.Context, report *debugReport, summary *buildSummary, name, mode, phase, statePath string, args []string, maxJobs int) (SegmentSample, error) {
 	if report != nil {
 		report.system(name+"-start", runner.outDir)

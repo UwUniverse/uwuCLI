@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strconv"
 	"testing"
+	"time"
 )
 
 func TestProductTargetsAndStableShuffle(t *testing.T) {
@@ -311,6 +312,105 @@ func TestStateValidationDetectsGraphChange(t *testing.T) {
 	}
 	if err := state.Validate(directory, directory, "uwu_nabu"); err == nil {
 		t.Fatal("changed graph was accepted")
+	}
+}
+
+func TestReuseStateChangesTargetAndRestoresBuildDate(t *testing.T) {
+	directory := t.TempDir()
+	outDir := filepath.Join(directory, "out")
+	if err := os.MkdirAll(outDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(directory, "Android.bp")
+	graph := filepath.Join(outDir, "combined.ninja")
+	buildDate := filepath.Join(outDir, "build_date.txt")
+	if err := os.WriteFile(config, []byte("filegroup {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(graph, []byte("build droid: phony\nbuild otapackage: phony\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(buildDate, []byte("new\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := os.Chtimes(config, now.Add(-time.Minute), now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	files := make([]GraphFile, 0, 2)
+	for _, path := range []string{graph, buildDate} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, GraphFile{Path: path, Size: info.Size(), ModTimeNano: info.ModTime().UnixNano()})
+	}
+	fingerprint, err := graphFingerprint(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(outDir, "state.json")
+	state := State{Version: stateVersion, SourceRoot: directory, OutDir: outDir,
+		TargetProduct: "uwu_test", TargetRelease: "cp2a", BuildVariant: "userdebug",
+		BuildDateTime: "123", BuildDateTimeFile: buildDate, GraphFiles: files,
+		GraphFingerprint: fingerprint, NinjaArgs: []string{"droid"}}
+	if err := SaveState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	reusedState, reused, err := ReuseState(statePath, directory, outDir, "uwu_test", "cp2a", "userdebug",
+		Options{Targets: []string{"otapackage"}, BuildArgs: []string{"otapackage"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reused || !reflect.DeepEqual(reusedState.NinjaArgs, []string{"otapackage"}) {
+		t.Fatalf("state was not reused: reused=%t targets=%v", reused, reusedState.NinjaArgs)
+	}
+	data, err := os.ReadFile(buildDate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "123\n" {
+		t.Fatalf("build date was not restored: %q", data)
+	}
+}
+
+func TestReuseStateRejectsGraphSourceChange(t *testing.T) {
+	directory := t.TempDir()
+	outDir := filepath.Join(directory, "out")
+	if err := os.MkdirAll(outDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(directory, "Android.bp")
+	graph := filepath.Join(outDir, "combined.ninja")
+	if err := os.WriteFile(config, []byte("filegroup {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(graph, []byte("build droid: phony\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := []GraphFile{{Path: graph, Size: info.Size(), ModTimeNano: info.ModTime().UnixNano()}}
+	fingerprint, err := graphFingerprint(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(outDir, "state.json")
+	state := State{Version: stateVersion, SourceRoot: directory, OutDir: outDir,
+		TargetProduct: "uwu_test", TargetRelease: "cp2a", BuildVariant: "userdebug",
+		BuildDateTime: "123", BuildDateTimeFile: filepath.Join(outDir, "date"),
+		GraphFiles: files, GraphFingerprint: fingerprint, SourceFingerprint: "stale"}
+	if err := SaveState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	_, reused, err := ReuseState(statePath, directory, outDir, "uwu_test", "cp2a", "userdebug", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused {
+		t.Fatal("changed source graph was reused")
 	}
 }
 
