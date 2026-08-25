@@ -19,7 +19,7 @@ import (
 	"sync"
 )
 
-const stateVersion = 6
+const stateVersion = 7
 
 const r8CacheVersion = 1
 
