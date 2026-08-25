@@ -82,11 +82,21 @@ print_banner() {
             title="ELF inspection"
             description="Check extracted proprietary ELF files without running Soong or Ninja"
             ;;
+        kernel)
+            title="Kernel migration"
+            description="Convert legacy kernel BoardConfig settings to uwu_kernel"
+            ;;
+        soong-only)
+            title="Soong-only readiness"
+            description="Find product packages that still depend on Make"
+            ;;
     esac
     if [[ "$LANGUAGE" == zh ]]; then
         case "${1:-migration}" in
             cli) title="开发者工具"; description="用于 uwuAOSP 设备适配与开发的工具集" ;;
             elf) title="ELF 检查"; description="无需运行 Soong 或 Ninja 即可检查已提取的专有 ELF 文件" ;;
+            kernel) title="内核迁移"; description="将 legacy BoardConfig 内核配置转换为 uwu_kernel" ;;
+            soong-only) title="Soong-only 就绪度"; description="查找仍依赖 Make 的产品 package" ;;
             *) title="产品迁移"; description="将 LineageOS 产品设备树转换为 uwuAOSP 设备树" ;;
         esac
     fi
@@ -140,7 +150,9 @@ global_usage() {
   uwu                                      启动交互式向导
   uwu product migrate lineage [操作]       迁移 LineageOS 产品设备树
   uwu vendor convert radio [选项]          将 vendor radio files 转换为 uwu_prebuilt_image
+  uwu kernel migrate [操作] [选项]         将 legacy 内核配置迁移到 uwu_kernel
   uwu inspect elf [选项]                   检查专有 ELF 文件
+  uwu inspect soong-only [选项]            分析阻止产品切换到 Soong-only 的 package
 
 命令：
   product migrate lineage
@@ -150,8 +162,15 @@ global_usage() {
   vendor convert radio
       将 vendor 树中自动生成的 radio files 转换为 uwu_prebuilt_image。
 
+  kernel migrate
+      分析并转换 BoardConfig 中的 legacy 内核配置。
+      操作：plan、apply。不能无损转换的配置会阻止 apply。
+
   inspect elf
       检查设备树已提取的专有 ELF 文件及其依赖和符号。
+
+  inspect soong-only
+      使用已有 Ninja/Kati 产物分析仍依赖 Make 的产品 package。
 
 全局选项：
   --language LANGUAGE        设置语言：en 或 zh
@@ -161,7 +180,9 @@ global_usage() {
   uwu
   uwu --language zh
   uwu product migrate lineage plan --device fajita --type phone --telephony
+  uwu kernel migrate plan --device-dir device/oneplus/sm8550-common
   uwu inspect elf --device fajita --jobs 4 --incremental
+  uwu inspect soong-only --device astonc
 EOF
     else
         cat <<'EOF'
@@ -169,7 +190,9 @@ Usage:
   uwu                                      Start the interactive wizard
   uwu product migrate lineage [ACTION]     Migrate a LineageOS product tree
   uwu vendor convert radio [OPTIONS]       Convert vendor radio files to uwu_prebuilt_image
+  uwu kernel migrate [ACTION] [OPTIONS]    Convert legacy kernel settings to uwu_kernel
   uwu inspect elf [OPTIONS]                Check proprietary ELF files
+  uwu inspect soong-only [OPTIONS]         Find packages blocking a Soong-only product
 
 Commands:
   product migrate lineage
@@ -179,8 +202,15 @@ Commands:
   vendor convert radio
       Convert vendor auto-generated radio files to uwu_prebuilt_image.
 
+  kernel migrate
+      Analyze and convert legacy kernel BoardConfig settings.
+      Actions: plan and apply. Lossy conversions block apply.
+
   inspect elf
       Check extracted proprietary ELF files, dependencies, and symbols.
+
+  inspect soong-only
+      Analyze existing Ninja/Kati outputs for packages that still depend on Make.
 
 Global options:
   --language LANGUAGE        Set the language to en or zh
@@ -190,7 +220,9 @@ Examples:
   uwu
   uwu --language zh
   uwu product migrate lineage plan --device fajita --type phone --telephony
+  uwu kernel migrate plan --device-dir device/oneplus/sm8550-common
   uwu inspect elf --device fajita --jobs 4 --incremental
+  uwu inspect soong-only --device astonc
 EOF
     fi
 }
@@ -299,6 +331,80 @@ Options:
   -h, --help                    Show this help
 EOF
     fi
+}
+
+soong_only_usage() {
+    [[ -n "$LANGUAGE" ]] || LANGUAGE=en
+    print_banner soong-only
+    if [[ "$LANGUAGE" == zh ]]; then
+        cat <<'EOF'
+uwu inspect soong-only - 分析产品切换到 Soong-only 前需处理的 package
+
+用法：
+  uwu inspect soong-only --device NAME [选项]
+  uwu inspect soong-only --product NAME [选项]
+
+选项：
+  --device NAME                 设备代号，例如 astonc
+  --product NAME                产品名，例如 uwu_astonc
+  --out-dir PATH                输出目录，默认 out
+  --format FORMAT               text 或 json
+  --all-variants                同时检查非当前构建变体的 package
+  --show-ready                  文本输出中也显示已由 Soong 提供的 package
+  -h, --help                    显示帮助
+
+该命令只读取指定产品已有的 Ninja/Kati 生成文件，不运行构建或遍历整个 out 目录。
+EOF
+    else
+        cat <<'EOF'
+uwu inspect soong-only - Find packages to handle before enabling Soong-only
+
+Usage:
+  uwu inspect soong-only --device NAME [options]
+  uwu inspect soong-only --product NAME [options]
+
+Options:
+  --device NAME                 Device codename, for example astonc
+  --product NAME                Product name, for example uwu_astonc
+  --out-dir PATH                Output directory, defaults to out
+  --format FORMAT               text or json
+  --all-variants                Include packages for inactive build variants
+  --show-ready                  Show Soong-backed packages in text output
+  -h, --help                    Show this help
+
+This command only reads generated files for the selected product. It does not run a build or
+scan the entire out directory.
+EOF
+    fi
+}
+
+inspect_soong_only() {
+    local output_format=text
+    local -a args=()
+    while (( $# )); do
+        case "$1" in
+            --device|--product|--out-dir|--format)
+                [[ $# -ge 2 ]] || die "$1 requires a value" 2
+                [[ "$1" != --format ]] || output_format="$2"
+                args+=("$1" "$2")
+                shift 2
+                ;;
+            --all-variants|--show-ready)
+                args+=("$1")
+                shift
+                ;;
+            -h|--help)
+                soong_only_usage
+                return 0
+                ;;
+            *) die "Unknown option: $1" 2 ;;
+        esac
+    done
+    require_source_tree
+    if [[ "$output_format" == text ]]; then
+        print_banner soong-only
+    fi
+    python3 "$SCRIPT_DIR/soong_only_packages.py" --language "$LANGUAGE" "${args[@]}"
 }
 
 msg() {
@@ -884,6 +990,88 @@ EOF
     fi
 }
 
+kernel_usage() {
+    [[ -n "$LANGUAGE" ]] || LANGUAGE=en
+    print_banner kernel
+    if [[ "$LANGUAGE" == zh ]]; then
+        cat <<'EOF'
+uwu kernel migrate - 将 legacy 内核配置转换为 uwu_kernel
+
+用法：
+  uwu kernel migrate [plan] (--device NAME | --device-dir PATH) [选项]
+  uwu kernel migrate apply (--device NAME | --device-dir PATH) [选项]
+
+选项：
+  --device NAME                 设备代号；自动解析继承的公共 BoardConfig
+  --device-dir PATH             设备树目录，例如 device/oneplus/sm8550-common
+  --board-config PATH           显式指定 BoardConfig 文件
+  --format FORMAT               text 或 json
+  -h, --help                    显示帮助
+
+plan 会显示生成的 uwu_kernel 和所有阻塞项。存在不能无损映射的配置时，apply
+会拒绝修改文件。转换器不会用不完整配置静默替换 legacy 构建。
+EOF
+    else
+        cat <<'EOF'
+uwu kernel migrate - Convert legacy kernel settings to uwu_kernel
+
+Usage:
+  uwu kernel migrate [plan] (--device NAME | --device-dir PATH) [options]
+  uwu kernel migrate apply (--device NAME | --device-dir PATH) [options]
+
+Options:
+  --device NAME                 Device codename; inherited common BoardConfigs are resolved
+  --device-dir PATH             Device tree directory, for example device/oneplus/sm8550-common
+  --board-config PATH           Select a BoardConfig file explicitly
+  --format FORMAT               text or json
+  -h, --help                    Show this help
+
+plan prints the generated uwu_kernel and every blocker. apply refuses to modify files when a
+setting cannot be converted without losing behavior.
+EOF
+    fi
+}
+
+kernel_migrate_main() {
+    local action=plan
+    if [[ "${1:-}" == plan || "${1:-}" == apply ]]; then
+        action="$1"
+        shift
+    fi
+    local -a args=("$action")
+    local output_format=text
+    while (( $# )); do
+        case "$1" in
+            --device|--device-dir|--board-config)
+                [[ $# -ge 2 ]] || die "$1 requires a value" 2
+                args+=("$1" "$2")
+                shift 2
+                ;;
+            --format)
+                [[ $# -ge 2 ]] || die "$1 requires a value" 2
+                output_format="$2"
+                args+=("$1" "$2")
+                shift 2
+                ;;
+            -h|--help)
+                kernel_usage
+                return 0
+                ;;
+            *) die "Unknown option: $1" 2 ;;
+        esac
+    done
+    local have_device=false arg
+    for arg in "${args[@]}"; do
+        [[ "$arg" == --device || "$arg" == --device-dir ]] && have_device=true
+    done
+    $have_device || die "--device or --device-dir is required" 2
+    require_source_tree
+    if [[ "$output_format" == text ]]; then
+        print_banner kernel
+    fi
+    python3 "$SCRIPT_DIR/kernel_migrate.py" "${args[@]}"
+}
+
 vendor_convert_radio_main() {
     local device_dir
     while (( $# )); do
@@ -988,6 +1176,13 @@ main() {
         fi
     fi
 
+    step 'Kernel migration'
+    if python3 "$SCRIPT_DIR/kernel_migrate.py" apply --device-dir "$(relative_path "$DEVICE_DIR")" --format json >/dev/null; then
+        status_line '✓' "$GREEN" 'Kernel' 'migrated to uwu_kernel'
+    else
+        status_line '!' "$YELLOW" 'Kernel' 'migration requires manual review'
+    fi
+
     printf 'Next step: lunch %s-cp2a-userdebug\n' "$UWU_PRODUCT"
 }
 
@@ -1011,12 +1206,18 @@ if (( $# > 0 )) && [[ -z "$LANGUAGE" ]]; then
     LANGUAGE=en
 fi
 
-if [[ $# -ge 2 && "$1" == inspect && "$2" == elf ]]; then
+if [[ $# -ge 2 && "$1" == inspect && "$2" == soong-only ]]; then
+    shift 2
+    inspect_soong_only "$@"
+elif [[ $# -ge 2 && "$1" == inspect && "$2" == elf ]]; then
     shift 2
     inspect_elf "$@"
 elif [[ $# -ge 3 && "$1" == vendor && "$2" == convert && "$3" == radio ]]; then
     shift 3
     vendor_convert_radio_main "$@"
+elif [[ $# -ge 2 && "$1" == kernel && "$2" == migrate ]]; then
+    shift 2
+    kernel_migrate_main "$@"
 elif [[ $# -eq 0 ]]; then
     [[ -n "$LANGUAGE" ]] || choose_language
     if choose_main_action; then
