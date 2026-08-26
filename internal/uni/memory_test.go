@@ -65,17 +65,17 @@ func TestInitialBatchSizeBacksOffNearOOM(t *testing.T) {
 	}
 }
 
-func TestHighmemJobsUsesFullConcurrency(t *testing.T) {
+func TestHighmemJobsUsesAvailableMemory(t *testing.T) {
 	snapshot := MemorySnapshot{Available: 27 * gibibyte, SwapFree: 30 * gibibyte}
-	if got := HighmemJobs(18, snapshot); got != 18 {
-		t.Fatalf("got %d, want 18", got)
+	if got := HighmemJobs(18, snapshot); got != 3 {
+		t.Fatalf("got %d, want 3", got)
 	}
 }
 
 func TestHighmemJobsBacksOffNearOOM(t *testing.T) {
 	snapshot := MemorySnapshot{Available: 900 * 1024 * 1024, SwapFree: 3 * gibibyte}
-	if got := HighmemJobs(18, snapshot); got != 9 {
-		t.Fatalf("got %d, want 9", got)
+	if got := HighmemJobs(18, snapshot); got != 1 {
+		t.Fatalf("got %d, want 1", got)
 	}
 }
 

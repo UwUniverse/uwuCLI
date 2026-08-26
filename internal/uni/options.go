@@ -39,6 +39,7 @@ type Options struct {
 	ShowCommands   bool
 	TrustOutput    bool
 	AssumeExisting bool
+	ForceReuse     bool
 	Targets        []string
 }
 
@@ -54,6 +55,7 @@ uni options:
   --uni-plan               Prepare the graph and print the schedule without running Ninja
   --uni-trust-output       Keep all recovered Ninja outputs without validation
   --uni-assume-existing    Trust existing outputs when Ninja log entries are missing
+  --uni-force-reuse        Reuse the prepared graph without source freshness checks
   --debug                   Write a concise build debug report into OUT_DIR
   -dev                      Force a complete R8 index scan from Ninja files
   -dev_1                    Persist automatic R8 index refresh
@@ -132,6 +134,9 @@ func ParseOptions(args []string) (Options, error) {
 		case "--uni-assume-existing":
 			options.AssumeExisting = true
 			options.TrustOutput = true
+			continue
+		case "--uni-force-reuse":
+			options.ForceReuse = true
 			continue
 		case "--debug":
 			options.Debug = true

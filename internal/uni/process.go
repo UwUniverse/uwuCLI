@@ -239,7 +239,7 @@ func (runner *commandRunner) run(ctx context.Context, mode, phase, statePath str
 			overrides = append(overrides, "SOONG_ANALYSIS_GC_PERCENT=200")
 		}
 	}
-	if mode == "--uni-ninja-mode" && phase != "only" {
+	if mode == "--uni-ninja-mode" && (phase != "only" || runner.assumeExistingNinja != "") {
 		overrides = append(overrides, "SOONG_NINJA="+runner.phasedNinja)
 		if runner.phasedNinja == "ninja" {
 			overrides = append(overrides, "NO_ABFS=true")
