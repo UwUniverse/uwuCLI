@@ -119,11 +119,7 @@ func ImminentOOM(available, swapFree int64) bool {
 }
 
 func HighmemJobs(maxJobs int, snapshot MemorySnapshot) int {
-	limit := MaximumJobs(maxJobs)
-	if ImminentOOM(snapshot.Available, snapshot.SwapFree) {
-		return max(1, limit/2)
-	}
-	return limit
+	return compilerPoolJobs(maxJobs, snapshot, 6*gibibyte)
 }
 
 func compilerPoolJobs(maxJobs int, snapshot MemorySnapshot, bytesPerJob int64) int {

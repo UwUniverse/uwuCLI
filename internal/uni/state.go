@@ -283,6 +283,48 @@ func ReuseState(path, sourceRoot, outDir, product, release, variant string, opti
 	return state, true, nil
 }
 
+// ForceReuseState skips freshness checks and refreshes graph metadata so a
+// prepared graph can be recovered after lunch or an interrupted analysis.
+func ForceReuseState(path, sourceRoot, outDir, product, release, variant string, options Options) (State, bool, error) {
+	if len(options.KeyValues) != 0 {
+		return State{}, false, fmt.Errorf("--uni-force-reuse cannot be combined with product variable overrides")
+	}
+	state, err := LoadState(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return State{}, false, nil
+		}
+		return State{}, false, err
+	}
+	if state.Version != stateVersion || state.BuildDateTime == "" || state.BuildDateTimeFile == "" ||
+		filepath.Clean(state.SourceRoot) != filepath.Clean(sourceRoot) ||
+		filepath.Clean(state.OutDir) != filepath.Clean(outDir) || state.TargetProduct != product {
+		return State{}, false, nil
+	}
+	if state.TargetRelease != release || state.BuildVariant != variant {
+		return State{}, false, nil
+	}
+	state.NinjaArgs = currentNinjaTargets(options)
+	state.OriginalArgs = append([]string(nil), options.BuildArgs...)
+	state.Dist = options.Dist
+	for index := range state.GraphFiles {
+		info, statErr := os.Stat(state.GraphFiles[index].Path)
+		if statErr != nil {
+			return State{}, false, fmt.Errorf("prepared graph file missing: %w", statErr)
+		}
+		state.GraphFiles[index].Size = info.Size()
+		state.GraphFiles[index].ModTimeNano = info.ModTime().UnixNano()
+	}
+	state.GraphFingerprint, err = graphFingerprint(state.GraphFiles)
+	if err != nil {
+		return State{}, false, err
+	}
+	if err := SaveState(path, state); err != nil {
+		return State{}, false, err
+	}
+	return state, true, nil
+}
+
 func RecordSourceFingerprint(path, sourceRoot, outDir string, state State) (State, error) {
 	fingerprint, _, err := sourceGraphFingerprint(sourceRoot, outDir)
 	if err != nil {

@@ -280,7 +280,13 @@ func Run(ctx context.Context, options Options) error {
 
 	release := os.Getenv("TARGET_RELEASE")
 	variant := os.Getenv("TARGET_BUILD_VARIANT")
-	state, reused, err := ReuseState(statePath, top, outDir, product, release, variant, options)
+	var state State
+	var reused bool
+	if options.ForceReuse {
+		state, reused, err = ForceReuseState(statePath, top, outDir, product, release, variant, options)
+	} else {
+		state, reused, err = ReuseState(statePath, top, outDir, product, release, variant, options)
+	}
 	if err != nil {
 		return fmt.Errorf("reuse prepared graph: %w", err)
 	}
