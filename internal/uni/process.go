@@ -6,6 +6,7 @@ package uni
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -33,10 +34,15 @@ type commandRunner struct {
 	trustOutput             bool
 	assumeExistingNinja     string
 	rustIncremental         bool
+	rustCodegenUnits        int
 	partialCompile          bool
 	kotlinDaemon            bool
 	incrementalAnalysis     bool
 	criticalPathSource      string
+	sisoPriorityTargets     []string
+	admission               poolAdmission
+	forceLocalNinja         bool
+	kernelJobs              int
 }
 
 func phasedNinjaExecutor(requested string) string {
@@ -51,6 +57,14 @@ func executorLabel(executor string) string {
 		return "default"
 	}
 	return executor
+}
+
+func forcePhasedNinja(mode, phase, assumeExisting string, forceLocal bool) bool {
+	return mode == "--uni-ninja-mode" && (forceLocal || phase != "only" || assumeExisting != "")
+}
+
+func nestedKernelJobs(maxJobs int) int {
+	return MaximumJobs(maxJobs)
 }
 
 func uniScopePrefix(outDir string) string {
@@ -130,10 +144,14 @@ func newCommandRunner(ctx context.Context, top string, keyValues []string) (*com
 	if _, set := environmentValue(runner.baseEnv, "SOONG_KOTLIN_DAEMON"); !set {
 		runner.baseEnv = overrideEnvironment(runner.baseEnv, "SOONG_KOTLIN_DAEMON=true")
 	}
+	if _, set := environmentValue(runner.baseEnv, "SOONG_RUSTC_CODEGEN_UNITS"); !set {
+		runner.baseEnv = overrideEnvironment(runner.baseEnv, "SOONG_RUSTC_CODEGEN_UNITS=4")
+	}
 	if _, set := environmentValue(runner.baseEnv, "SOONG_INCREMENTAL_ANALYSIS"); !set {
 		runner.baseEnv = overrideEnvironment(runner.baseEnv, "SOONG_INCREMENTAL_ANALYSIS=true")
 	}
 	runner.rustIncremental = environmentTrue(runner.baseEnv, "SOONG_RUSTC_INCREMENTAL")
+	runner.rustCodegenUnits, _ = positiveEnvironmentInt(runner.baseEnv, "SOONG_RUSTC_CODEGEN_UNITS")
 	runner.partialCompile = environmentTrue(runner.baseEnv, "SOONG_USE_PARTIAL_COMPILE")
 	runner.kotlinDaemon = environmentTrue(runner.baseEnv, "SOONG_KOTLIN_DAEMON")
 	runner.incrementalAnalysis = environmentTrue(runner.baseEnv, "SOONG_INCREMENTAL_ANALYSIS")
@@ -149,11 +167,11 @@ func newCommandRunner(ctx context.Context, top string, keyValues []string) (*com
 	if active != "" {
 		return nil, fmt.Errorf("an existing uni build is still running: %s", active)
 	}
-	useCcache := os.Getenv("USE_CCACHE")
+	useCcache, _ := environmentValue(runner.baseEnv, "USE_CCACHE")
 	runner.useCcache = useCcache != "" && !strings.EqualFold(useCcache, "false")
-	_, runnerCompilerCheckSet := os.LookupEnv("CCACHE_COMPILERCHECK")
+	_, runnerCompilerCheckSet := environmentValue(runner.baseEnv, "CCACHE_COMPILERCHECK")
 	runner.autoCcacheCompilerCheck = runner.useCcache && !runnerCompilerCheckSet
-	_, runnerFileCloneSet := os.LookupEnv("CCACHE_FILECLONE")
+	_, runnerFileCloneSet := environmentValue(runner.baseEnv, "CCACHE_FILECLONE")
 	runner.autoCcacheFileClone = runner.useCcache && !runnerFileCloneSet && canAutoEnableFileClone(top, outDir)
 	if _, err := os.Stat(runner.soongUIPath); err != nil {
 		return nil, err
@@ -168,14 +186,40 @@ func (runner *commandRunner) disableIncrementalAnalysis() {
 }
 
 func (runner *commandRunner) runReported(ctx context.Context, report *debugReport, summary *buildSummary, name, mode, phase, statePath string, args []string, maxJobs int) (SegmentSample, error) {
+	tui := compactTUIFromContext(ctx)
+	if tui != nil {
+		tui.phaseStarted(name, maxJobs)
+	}
 	if report != nil {
 		report.system(name+"-start", runner.outDir)
+		report.event("command_start phase=%s mode=%s ninja_phase=%s jobs=%d arguments=%s", name, mode, phase, maxJobs, quoteArguments(args))
 	}
 	started := time.Now()
-	sample, err := runner.run(ctx, mode, phase, statePath, args, maxJobs)
+	var telemetrySink func(TelemetrySample)
+	if report != nil || tui != nil {
+		telemetrySink = func(sample TelemetrySample) {
+			if report != nil {
+				report.telemetry(name, sample)
+			}
+			if tui != nil {
+				tui.updateTelemetry(sample)
+			}
+		}
+	}
+	sample, err := runner.runWithTelemetry(ctx, mode, phase, statePath, args, maxJobs, telemetrySink)
+	sample.Phase = name
+	sample.Duration = time.Since(started)
 	summary.add(sample)
 	if report != nil {
 		report.phase(name, started, sample, err, runner.outDir)
+		result := "ok"
+		if err != nil {
+			result = err.Error()
+		}
+		report.event("command_end phase=%s elapsed=%s result=%q", name, sample.Duration.Round(time.Millisecond), result)
+	}
+	if tui != nil {
+		tui.phaseFinished(name, err)
 	}
 	return sample, err
 }
@@ -194,9 +238,15 @@ func (runner *commandRunner) probeCgroup(ctx context.Context) bool {
 }
 
 func (runner *commandRunner) run(ctx context.Context, mode, phase, statePath string, args []string, maxJobs int) (SegmentSample, error) {
+	return runner.runWithTelemetry(ctx, mode, phase, statePath, args, maxJobs, nil)
+}
+
+func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, statePath string, args []string, maxJobs int, telemetrySink func(TelemetrySample)) (SegmentSample, error) {
 	snapshot, err := ReadMemorySnapshot()
+	var telemetryWarnings []string
 	if err != nil {
-		return SegmentSample{}, err
+		telemetryWarnings = append(telemetryWarnings, fmt.Sprintf("read initial memory telemetry: %v", err))
+		snapshot = MemorySnapshot{}
 	}
 	command := runner.soongUIPath
 	if mode == "--uni-ninja-mode" {
@@ -215,7 +265,9 @@ func (runner *commandRunner) run(ctx context.Context, mode, phase, statePath str
 
 	cmd := exec.Command(command, commandArgs...)
 	cmd.Dir = runner.top
-	cmd.Stdin = os.Stdin
+	if compactTUIFromContext(ctx) == nil {
+		cmd.Stdin = os.Stdin
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -228,24 +280,45 @@ func (runner *commandRunner) run(ctx context.Context, mode, phase, statePath str
 		"UNI_R8_MODULES_FILE=" + filepath.Join(filepath.Dir(statePath), "soong_r8_modules.txt"),
 		"UNI_NINJA_PHASE=" + phase,
 	}
+	analysisMemoryLimit := int64(0)
+	analysisGCPercent := 0
 	if mode == "--uni-prepare-mode" {
-		if _, set := os.LookupEnv("SOONG_ANALYSIS_MEMORY_LIMIT_BYTES"); !set {
-			limit := AnalysisMemoryLimit(snapshot.Total)
-			if limit > 0 {
-				overrides = append(overrides, "SOONG_ANALYSIS_MEMORY_LIMIT_BYTES="+strconv.FormatInt(limit, 10))
+		if value, set := environmentValue(runner.baseEnv, "SOONG_ANALYSIS_MEMORY_LIMIT_BYTES"); set {
+			analysisMemoryLimit, _ = strconv.ParseInt(value, 10, 64)
+		} else {
+			analysisMemoryLimit = AnalysisMemoryLimit(snapshot.Total, snapshot.Available)
+			if analysisMemoryLimit > 0 {
+				overrides = append(overrides, "SOONG_ANALYSIS_MEMORY_LIMIT_BYTES="+strconv.FormatInt(analysisMemoryLimit, 10))
 			}
 		}
-		if _, set := os.LookupEnv("SOONG_ANALYSIS_GC_PERCENT"); !set {
-			overrides = append(overrides, "SOONG_ANALYSIS_GC_PERCENT=200")
+		if value, set := environmentValue(runner.baseEnv, "SOONG_ANALYSIS_GC_PERCENT"); set {
+			analysisGCPercent, _ = strconv.Atoi(value)
+		} else {
+			analysisGCPercent = 200
+			overrides = append(overrides, "SOONG_ANALYSIS_GC_PERCENT="+strconv.Itoa(analysisGCPercent))
 		}
+		fmt.Printf("uni: Android.bp analysis memory limit %s, GOGC=%d\n",
+			formatBytes(analysisMemoryLimit), analysisGCPercent)
 	}
-	if mode == "--uni-ninja-mode" && (phase != "only" || runner.assumeExistingNinja != "") {
+	if forcePhasedNinja(mode, phase, runner.assumeExistingNinja, runner.forceLocalNinja) {
 		overrides = append(overrides, "SOONG_NINJA="+runner.phasedNinja)
 		if runner.phasedNinja == "ninja" {
 			overrides = append(overrides, "NO_ABFS=true")
 		}
 	}
 	if mode == "--uni-ninja-mode" {
+		if runner.kernelJobs > 0 {
+			if _, set := environmentValue(runner.baseEnv, "UNI_KERNEL_JOBS"); !set {
+				overrides = append(overrides, "UNI_KERNEL_JOBS="+strconv.Itoa(runner.kernelJobs))
+			}
+		}
+		if phase == "only" && len(runner.sisoPriorityTargets) > 0 {
+			priorityTargets, marshalErr := json.Marshal(runner.sisoPriorityTargets)
+			if marshalErr != nil {
+				return SegmentSample{}, fmt.Errorf("encode Siso priority targets: %w", marshalErr)
+			}
+			overrides = append(overrides, "UNI_SISO_PRIORITY_TARGETS="+string(priorityTargets))
+		}
 		if _, set := os.LookupEnv("SOONG_UI_TABLE_HEIGHT"); !set {
 			overrides = append(overrides, "SOONG_UI_TABLE_HEIGHT=4")
 		}
@@ -264,40 +337,32 @@ func (runner *commandRunner) run(ctx context.Context, mode, phase, statePath str
 	if runner.autoCcacheFileClone {
 		overrides = append(overrides, "CCACHE_FILECLONE=true")
 	}
-	highmemJobs := HighmemJobs(maxJobs, snapshot)
-	if value, valid := positiveEnvironmentInt(runner.baseEnv, "NINJA_HIGHMEM_NUM_JOBS"); valid {
-		highmemJobs = value
-	} else {
+	pools := runner.admission.decide(maxJobs, snapshot, runner.baseEnv, runner.rustCodegenUnits)
+	highmemJobs, r8Jobs, rustJobs := pools.highmem, pools.r8, pools.rust
+	javaJobs, kotlinJobs := pools.java, pools.kotlin
+	if !pools.highmemExplicit {
 		overrides = append(overrides, "NINJA_HIGHMEM_NUM_JOBS="+strconv.Itoa(highmemJobs))
 	}
-	r8Jobs := highmemJobs
-	if value, valid := positiveEnvironmentInt(runner.baseEnv, "NINJA_UNI_R8_NUM_JOBS"); valid {
-		r8Jobs = value
-	} else {
+	if !pools.r8Explicit {
 		overrides = append(overrides, "NINJA_UNI_R8_NUM_JOBS="+strconv.Itoa(r8Jobs))
 	}
-	javaJobs := JavaJobs(maxJobs, snapshot)
-	if value, valid := positiveEnvironmentInt(runner.baseEnv, "NINJA_UNI_JAVA_NUM_JOBS"); valid {
-		javaJobs = value
-	} else {
+	if !pools.rustExplicit {
+		overrides = append(overrides, "NINJA_UNI_RUST_NUM_JOBS="+strconv.Itoa(rustJobs))
+	}
+	if !pools.javaExplicit {
 		overrides = append(overrides, "NINJA_UNI_JAVA_NUM_JOBS="+strconv.Itoa(javaJobs))
 	}
-	kotlinJobs := KotlinJobs(maxJobs, snapshot)
-	if value, valid := positiveEnvironmentInt(runner.baseEnv, "NINJA_UNI_KOTLIN_NUM_JOBS"); valid {
-		kotlinJobs = value
-	} else {
+	if !pools.kotlinExplicit {
 		overrides = append(overrides, "NINJA_UNI_KOTLIN_NUM_JOBS="+strconv.Itoa(kotlinJobs))
 	}
-	fmt.Printf("uni: pools high-memory=%d R8=%d Java=%d Kotlin=%d, available %s\n",
-		highmemJobs, r8Jobs, javaJobs, kotlinJobs, formatBytes(snapshot.Available))
+	fmt.Printf("uni: pools high-memory=%d R8=%d Rust=%d Java=%d Kotlin=%d, available %s\n",
+		highmemJobs, r8Jobs, rustJobs, javaJobs, kotlinJobs, formatBytes(snapshot.Available))
 	environment := overrideEnvironment(runner.baseEnv, overrides...)
 	cmd.Env = environment
 
-	monitor := startMemoryMonitor()
 	recoveryMarked := false
 	if mode == "--uni-ninja-mode" {
 		if err := markNinjaRecoveryRequired(runner.outDir); err != nil {
-			monitor.finish()
 			return SegmentSample{}, fmt.Errorf("mark Ninja recovery state: %w", err)
 		}
 		recoveryMarked = true
@@ -306,7 +371,6 @@ func (runner *commandRunner) run(ctx context.Context, mode, phase, statePath str
 		if recoveryMarked {
 			_ = clearNinjaRecoveryRequired(runner.outDir)
 		}
-		monitor.finish()
 		return SegmentSample{}, err
 	}
 	rootIdentity, identityErr := readProcessIdentity(cmd.Process.Pid)
@@ -318,7 +382,6 @@ func (runner *commandRunner) run(ctx context.Context, mode, phase, statePath str
 				_ = clearNinjaRecoveryRequired(runner.outDir)
 			}
 		}
-		monitor.finish()
 		return SegmentSample{}, fmt.Errorf("identify active build: %w", identityErr)
 	}
 	lease, leaseErr := writeActiveBuildLeaseForProcess(runner.outDir, rootIdentity, scopeUnit)
@@ -330,9 +393,9 @@ func (runner *commandRunner) run(ctx context.Context, mode, phase, statePath str
 				_ = clearNinjaRecoveryRequired(runner.outDir)
 			}
 		}
-		monitor.finish()
 		return SegmentSample{}, fmt.Errorf("record active build: %w", leaseErr)
 	}
+	monitor := startMemoryMonitor(rootIdentity, runner.outDir, telemetrySink)
 	done := make(chan struct{})
 	cancelFinished := make(chan struct{})
 	go func() {
@@ -351,10 +414,24 @@ func (runner *commandRunner) run(ctx context.Context, mode, phase, statePath str
 	<-cancelFinished
 	leaseErr = clearActiveBuildLease(runner.outDir, lease.Token)
 	sample := monitor.finish()
+	sample.Warnings = append(telemetryWarnings, sample.Warnings...)
 	sample.HighmemJobs = highmemJobs
 	sample.R8Jobs = r8Jobs
+	sample.RustJobs = rustJobs
 	sample.JavaJobs = javaJobs
 	sample.KotlinJobs = kotlinJobs
+	sample.HighmemExplicit = pools.highmemExplicit
+	sample.R8Explicit = pools.r8Explicit
+	sample.RustExplicit = pools.rustExplicit
+	sample.JavaExplicit = pools.javaExplicit
+	sample.KotlinExplicit = pools.kotlinExplicit
+	sample.PoolReason = pools.reason
+	sample.AnalysisLimit = analysisMemoryLimit
+	sample.AnalysisGC = analysisGCPercent
+	runner.admission.observe(sample)
+	for _, warning := range sample.Warnings {
+		fmt.Fprintf(os.Stderr, "uni: telemetry warning: %s\n", warning)
+	}
 	var checkpointErr error
 	if mode == "--uni-ninja-mode" {
 		checkpointErr = checkpointNinjaState(runner.outDir, err != nil, runner.trustOutput)
@@ -431,10 +508,11 @@ func terminateBuildProcessTree(root processIdentity, scopeUnit, outDir string) {
 	terminateProcessIdentityTree(root, scopeUnit)
 	processes := runningUniProcesses(outDir)
 	signalProcessIdentities(processes, syscall.SIGTERM)
-	if waitForProcessIdentitiesExit(processes, 500*time.Millisecond) {
+	waitForProcessIdentitiesExit(processes, 500*time.Millisecond)
+	processes = runningUniProcesses(outDir)
+	if len(processes) == 0 {
 		return
 	}
-	processes = mergeProcessIdentities(processes, runningUniProcesses(outDir))
 	signalProcessIdentities(processes, syscall.SIGKILL)
 	waitForProcessIdentitiesExit(processes, 2*time.Second)
 }

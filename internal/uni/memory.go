@@ -6,12 +6,10 @@ package uni
 import (
 	"bufio"
 	"fmt"
-	"math"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -20,26 +18,84 @@ type MemorySnapshot struct {
 	Available   int64
 	SwapTotal   int64
 	SwapFree    int64
+	SwapInPage  uint64
 	SwapOutPage uint64
+	MajorFaults uint64
+	OOMKills    uint64
+}
+
+type ProcessRSS struct {
+	PID       int
+	Name      string
+	TaskType  string
+	RSSBytes  int64
+	Timestamp time.Time
 }
 
 type SegmentSample struct {
+	InitialAvailable int64
+	FinalAvailable   int64
 	MinimumAvailable int64
+	InitialSwapFree  int64
+	FinalSwapFree    int64
 	MinimumSwapFree  int64
+	MaxPSISomeAvg10  float64
+	MaxPSISomeAvg60  float64
+	MaxPSISomeAvg300 float64
+	MaxPSIFullAvg10  float64
+	MaxPSIFullAvg60  float64
+	MaxPSIFullAvg300 float64
+	MaxSwapInRate    float64
+	MaxSwapOutRate   float64
+	AverageCPU       float64
+	MaxCPU           float64
+	Samples          int
+	MaxProcesses     int
+	MaxTrackedRSS    int64
+	MaxR8            int
+	MaxLinker        int
+	MaxJavac         int
+	MaxKotlinc       int
+	MaxRustc         int
+	MaxClang         int
+	TopRSS           []ProcessRSS
+	Warnings         []string
 	SwapOutBytes     uint64
+	SwapInBytes      uint64
+	MajorFaults      uint64
+	OOMKills         uint64
 	HighmemJobs      int
 	R8Jobs           int
+	RustJobs         int
 	JavaJobs         int
 	KotlinJobs       int
+	HighmemExplicit  bool
+	R8Explicit       bool
+	RustExplicit     bool
+	JavaExplicit     bool
+	KotlinExplicit   bool
+	PoolReason       string
+	AnalysisLimit    int64
+	AnalysisGC       int
+	Phase            string
+	Duration         time.Duration
 }
 
-func AnalysisMemoryLimit(total int64) int64 {
+func AnalysisMemoryLimit(total, available int64) int64 {
 	if total <= 0 {
 		return 0
 	}
+	// Android.bp analysis has non-Go memory and is followed by Kati. Leaving a
+	// physical reserve is faster than letting the Go heap reclaim through swap.
 	reserve := max(4*gibibyte, total/5)
 	limit := total - reserve
-	return max(8*gibibyte, limit)
+	if available > 2*gibibyte {
+		limit = min(limit, available-2*gibibyte)
+	}
+	if limit > 0 {
+		return limit
+	}
+	return max(1, total/2)
 }
 
 func ReadMemorySnapshot() (MemorySnapshot, error) {
@@ -77,20 +133,25 @@ func ReadMemorySnapshot() (MemorySnapshot, error) {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
-		if len(fields) == 2 && fields[0] == "pswpout" {
+		if len(fields) != 2 {
+			continue
+		}
+		switch fields[0] {
+		case "pswpin":
+			snapshot.SwapInPage, _ = strconv.ParseUint(fields[1], 10, 64)
+		case "pswpout":
 			snapshot.SwapOutPage, _ = strconv.ParseUint(fields[1], 10, 64)
-			break
+		case "pgmajfault":
+			snapshot.MajorFaults, _ = strconv.ParseUint(fields[1], 10, 64)
+		case "oom_kill":
+			snapshot.OOMKills, _ = strconv.ParseUint(fields[1], 10, 64)
 		}
 	}
 	return snapshot, scanner.Err()
 }
 
 func InitialJobs(maxJobs int, snapshot MemorySnapshot) int {
-	limit := MaximumJobs(maxJobs)
-	if ImminentOOM(snapshot.Available, snapshot.SwapFree) {
-		return max(1, limit/2)
-	}
-	return limit
+	return MaximumJobs(maxJobs)
 }
 
 func MaximumJobs(maxJobs int) int {
@@ -101,30 +162,35 @@ func MaximumJobs(maxJobs int) int {
 }
 
 func InitialBatchSize(configured, targets int, snapshot MemorySnapshot) int {
-	batchSize := configured
-	if ImminentOOM(snapshot.Available, snapshot.SwapFree) {
-		batchSize = max(minimumBatchSize, int(math.Floor(float64(batchSize)*0.75)))
-	} else {
-		batchSize = maximumBatchSize
-	}
-	batchSize = min(maximumBatchSize, batchSize)
+	batchSize := min(configured, automaticMaximumBatchSize)
 	if targets > 0 {
 		batchSize = min(batchSize, targets)
 	}
 	return max(1, batchSize)
 }
 
-func ImminentOOM(available, swapFree int64) bool {
-	return available < gibibyte || (available < 2*gibibyte && swapFree < 4*gibibyte)
-}
-
 func HighmemJobs(maxJobs int, snapshot MemorySnapshot) int {
-	return compilerPoolJobs(maxJobs, snapshot, 6*gibibyte)
+	return burstPoolJobs(maxJobs, snapshot)
 }
 
-func compilerPoolJobs(maxJobs int, snapshot MemorySnapshot, bytesPerJob int64) int {
+func R8Jobs(maxJobs int, snapshot MemorySnapshot) int {
+	return burstPoolJobs(maxJobs, snapshot)
+}
+
+func burstPoolJobs(maxJobs int, snapshot MemorySnapshot) int {
 	limit := MaximumJobs(maxJobs)
-	budget := snapshot.Available - 4*gibibyte
+	if snapshot.Available <= 0 || snapshot.Available >= 8*gibibyte {
+		return limit
+	}
+	return max(1, min(limit, int(snapshot.Available/(2*gibibyte))))
+}
+
+func memoryPoolJobs(maxJobs int, snapshot MemorySnapshot, bytesPerJob int64) int {
+	limit := MaximumJobs(maxJobs)
+	if snapshot.Available <= 0 || bytesPerJob <= 0 {
+		return limit
+	}
+	budget := snapshot.Available - 3*gibibyte
 	if budget <= 0 {
 		return 1
 	}
@@ -132,104 +198,27 @@ func compilerPoolJobs(maxJobs int, snapshot MemorySnapshot, bytesPerJob int64) i
 }
 
 func JavaJobs(maxJobs int, snapshot MemorySnapshot) int {
-	return compilerPoolJobs(maxJobs, snapshot, 2*gibibyte)
+	return memoryPoolJobs(maxJobs, snapshot, 2*gibibyte)
+}
+
+func RustJobs(maxJobs int, snapshot MemorySnapshot, codegenUnits int) int {
+	limit := MaximumJobs(maxJobs)
+	if codegenUnits < 1 {
+		codegenUnits = 1
+	}
+	// Ninja accounts for a rustc process as one job while LLVM can run one
+	// backend worker per codegen unit. Bound both layers so Rust still fills the
+	// machine without allowing every Ninja slot to fan out independently.
+	cpuBound := max(1, (limit+codegenUnits-1)/codegenUnits)
+	memoryBound := memoryPoolJobs(limit, snapshot, 2*gibibyte)
+	return min(cpuBound, memoryBound)
 }
 
 func KotlinJobs(maxJobs int, snapshot MemorySnapshot) int {
-	return compilerPoolJobs(maxJobs, snapshot, 4*gibibyte)
-}
-
-func Adapt(batchSize, jobs, maxJobs int, sample SegmentSample) (int, int) {
-	if ImminentOOM(sample.MinimumAvailable, sample.MinimumSwapFree) {
-		batchSize = max(minimumBatchSize, int(math.Floor(float64(batchSize)*0.75)))
-		jobs = max(1, int(math.Floor(float64(jobs)*0.75)))
-	} else {
-		batchSize = min(maximumBatchSize, batchSize*2)
-		jobs = MaximumJobs(maxJobs)
-	}
-	if maxJobs > 0 {
-		jobs = min(jobs, maxJobs)
-	} else {
-		jobs = min(jobs, runtime.NumCPU()+2)
-	}
-	return batchSize, max(1, jobs)
-}
-
-type memoryMonitor struct {
-	stop        chan struct{}
-	done        chan struct{}
-	once        sync.Once
-	mu          sync.Mutex
-	min         int64
-	minSwapFree int64
-	base        uint64
-	last        uint64
-}
-
-func startMemoryMonitor() *memoryMonitor {
-	monitor := &memoryMonitor{
-		stop:        make(chan struct{}),
-		done:        make(chan struct{}),
-		min:         math.MaxInt64,
-		minSwapFree: math.MaxInt64,
-	}
-	if snapshot, err := ReadMemorySnapshot(); err == nil {
-		monitor.min = snapshot.Available
-		monitor.minSwapFree = snapshot.SwapFree
-		monitor.base = snapshot.SwapOutPage
-		monitor.last = snapshot.SwapOutPage
-	}
-	go func() {
-		defer close(monitor.done)
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				monitor.record()
-			case <-monitor.stop:
-				monitor.record()
-				return
-			}
-		}
-	}()
-	return monitor
-}
-
-func (monitor *memoryMonitor) record() {
-	snapshot, err := ReadMemorySnapshot()
-	if err != nil {
-		return
-	}
-	monitor.mu.Lock()
-	defer monitor.mu.Unlock()
-	monitor.min = min(monitor.min, snapshot.Available)
-	monitor.minSwapFree = min(monitor.minSwapFree, snapshot.SwapFree)
-	monitor.last = snapshot.SwapOutPage
-}
-
-func (monitor *memoryMonitor) finish() SegmentSample {
-	monitor.once.Do(func() { close(monitor.stop) })
-	<-monitor.done
-	monitor.mu.Lock()
-	defer monitor.mu.Unlock()
-	minimum := monitor.min
-	if minimum == math.MaxInt64 {
-		minimum = 0
-	}
-	minimumSwapFree := monitor.minSwapFree
-	if minimumSwapFree == math.MaxInt64 {
-		minimumSwapFree = 0
-	}
-	pages := uint64(0)
-	if monitor.last > monitor.base {
-		pages = monitor.last - monitor.base
-	}
-	return SegmentSample{
-		MinimumAvailable: minimum,
-		MinimumSwapFree:  minimumSwapFree,
-		SwapOutBytes:     pages * uint64(os.Getpagesize()),
-	}
+	// Equal JVM arguments let the build-tools client reuse one Kotlin daemon.
+	// Four GiB per admitted edge keeps six requests available on this host while
+	// retaining physical memory for javac, clang and the daemon's 8 GiB heap.
+	return memoryPoolJobs(maxJobs, snapshot, 4*gibibyte)
 }
 
 func formatBytes(value int64) string {

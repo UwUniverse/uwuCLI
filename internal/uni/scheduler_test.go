@@ -69,14 +69,77 @@ func TestBuildOutput(t *testing.T) {
 	}
 }
 
-func TestScheduledR8PrimeTargets(t *testing.T) {
-	packages := []string{"r1", "a", "r2", "b"}
-	r8Modules := map[string]struct{}{"r1": {}, "r2": {}}
-	if got := scheduledR8PrimeTargets(packages, r8Modules, 18, len(packages)); got != nil {
-		t.Fatalf("single segment returned R8 prime targets: %v", got)
+func TestFinalNinjaTargetsIncludesKernelWithoutExtraPhase(t *testing.T) {
+	state := State{NinjaArgs: []string{"otapackage"}}
+	want := []string{"kernel", "otapackage"}
+	if got := finalNinjaTargets(state, Options{}, "kernel"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("final targets = %v, want %v", got, want)
 	}
-	if got := scheduledR8PrimeTargets(packages, r8Modules, 18, 2); !reflect.DeepEqual(got, []string{"r1"}) {
-		t.Fatalf("multi-segment R8 prime targets: %v", got)
+	state.NinjaArgs = []string{"kernel", "otapackage"}
+	if got := finalNinjaTargets(state, Options{}, "kernel"); !reflect.DeepEqual(got, state.NinjaArgs) {
+		t.Fatalf("kernel target was duplicated: %v", got)
+	}
+}
+
+func TestCleanBuildThroughputDefaults(t *testing.T) {
+	options, err := ParseOptions([]string{"-j18", "otapackage"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := MemorySnapshot{
+		Total: 32 * gibibyte, Available: 28 * gibibyte,
+		SwapTotal: 50 * gibibyte, SwapFree: 48 * gibibyte,
+	}
+	batch := scheduledBatchSize(options, 1528, snapshot)
+	if batch != 1528 || !useSingleGraph(make([]string, 1528), batch) {
+		t.Fatalf("batch=%d did not select one full graph", batch)
+	}
+	decision := (&poolAdmission{}).decide(options.MaxJobs, snapshot, nil, 4)
+	if decision.highmem != 18 || decision.r8 != 18 || decision.rust != 5 || decision.java != 12 || decision.kotlin != 6 {
+		t.Fatalf("throughput pools = %+v, want 18/18/5/12/6", decision)
+	}
+	if got := phaseArgs(options, []string{"otapackage"}, 18, false); !reflect.DeepEqual(got, []string{"-j18", "otapackage"}) {
+		t.Fatalf("phase args = %v", got)
+	}
+	if got := startupPackageLimit(18, 1528); got != 9 {
+		t.Fatalf("startup package limit = %d, want 9", got)
+	}
+	if got := startupPhaseJobs(18, 18, true); got != 1 {
+		t.Fatalf("startup phase jobs = %d, want 1", got)
+	}
+	if got := startupPhaseJobs(18, 18, false); got != 18 {
+		t.Fatalf("kernel-free startup phase jobs = %d, want 18", got)
+	}
+}
+
+func TestSelectStartupSchedulePrioritizesHistoricalLongTargets(t *testing.T) {
+	packages := []string{"r1", "a", "r2", "b", "r3", "c"}
+	r8Modules := map[string]struct{}{"r1": {}, "r2": {}, "r3": {}}
+	weights := map[string]float64{"a": 90, "b": 80, "r1": 70}
+	schedule := selectStartupSchedule(packages, weights, r8Modules, "kernel", 8)
+	want := []string{"kernel", "a", "b", "r1", "r2"}
+	if !reflect.DeepEqual(schedule.targets, want) {
+		t.Fatalf("startup targets = %v, want %v", schedule.targets, want)
+	}
+	if schedule.packageCount != 4 || schedule.historyCount != 3 || schedule.r8Count != 2 || schedule.nonR8Count != 2 {
+		t.Fatalf("unexpected startup counts: %+v", schedule)
+	}
+	if got := startupPackageLimit(1, len(packages)); got != 4 {
+		t.Fatalf("small-machine startup limit = %d, want 4", got)
+	}
+}
+
+func TestSingleGraphStartupKeepsKernelExclusive(t *testing.T) {
+	schedule := startupSchedule{
+		targets:      []string{"kernel", "Settings", "SystemUI"},
+		packageCount: 2, r8Count: 2,
+	}
+	got := constrainStartupForGraph(schedule, "kernel", true)
+	if !reflect.DeepEqual(got.targets, []string{"kernel"}) || got.packageCount != 0 || got.r8Count != 0 {
+		t.Fatalf("single-graph startup = %+v, want exclusive kernel", got)
+	}
+	if got := constrainStartupForGraph(schedule, "kernel", false); !reflect.DeepEqual(got, schedule) {
+		t.Fatalf("multi-graph startup changed: %+v", got)
 	}
 }
 
@@ -86,5 +149,17 @@ func TestUseSingleGraph(t *testing.T) {
 	}
 	if useSingleGraph([]string{"a", "b", "c"}, 2) {
 		t.Fatal("multiple batches used the final graph fast path")
+	}
+}
+
+func TestTakeBatchWithR8Limit(t *testing.T) {
+	targets := []string{"r1", "r2", "r3", "a", "b", "c"}
+	r8 := map[string]struct{}{"r1": {}, "r2": {}, "r3": {}}
+	batch := takeBatchWithR8Limit(targets, 4, r8, 1)
+	if got := R8TargetCount(batch, r8); got != 1 {
+		t.Fatalf("R8 count = %d, want 1: %v", got, batch)
+	}
+	if len(batch) != 4 {
+		t.Fatalf("batch size = %d, want 4: %v", len(batch), batch)
 	}
 }
