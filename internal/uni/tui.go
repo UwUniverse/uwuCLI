@@ -197,8 +197,12 @@ func compactMessagesForLocale(chinese bool) compactMessages {
 }
 
 func newCompactTUI(input, terminal *os.File) *compactTUI {
+	return newCompactTUIForLocale(input, terminal, false)
+}
+
+func newCompactTUIForLocale(input, terminal *os.File, chinese bool) *compactTUI {
 	names := []string{"Graph", "Kernel", "Startup", "Main"}
-	messages := compactMessagesForLocale(false)
+	messages := compactMessagesForLocale(chinese)
 	tui := &compactTUI{
 		terminal:     terminal,
 		input:        input,
@@ -1216,7 +1220,7 @@ func RunWithCompactTUI(ctx context.Context, options Options) (runErr error) {
 	}
 
 	originalStdout, originalStderr := os.Stdout, os.Stderr
-	tui := newCompactTUI(os.Stdin, originalStdout)
+	tui := newCompactTUIForLocale(os.Stdin, originalStdout, true)
 	tui.interrupt = func() {
 		if process, err := os.FindProcess(os.Getpid()); err == nil {
 			_ = process.Signal(os.Interrupt)

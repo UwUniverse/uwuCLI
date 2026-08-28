@@ -174,6 +174,14 @@ func TestCompactMessagesSupportChineseAndEnglish(t *testing.T) {
 	}
 }
 
+func TestCompactTUIChineseLocale(t *testing.T) {
+	tui := newCompactTUIForLocale(nil, nil, true)
+	frame := tui.frame(true)
+	if !strings.Contains(frame, "[任务]") || !strings.Contains(frame, "内核") || !strings.Contains(frame, "等待") {
+		t.Fatalf("TUI is not Chinese: %q", frame)
+	}
+}
+
 func TestCompactTUIHandlesApplicationCursorKeysAndViKeys(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
 	for _, input := range [][]byte{[]byte("\x1bOA"), []byte("j"), []byte("\x1b[1;2B")} {
