@@ -697,9 +697,11 @@ func (tui *compactTUI) inputLoop() {
 			pending = tui.handleInput(pending)
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
+			if errors.Is(err, os.ErrClosed) {
 				return
 			}
+			// VMIN=0 and VTIME>0 makes an idle terminal read return zero bytes,
+			// which os.File reports as io.EOF. Keep polling for keyboard input.
 			time.Sleep(5 * time.Millisecond)
 		} else if count == 0 {
 			time.Sleep(1 * time.Millisecond)
