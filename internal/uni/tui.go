@@ -28,7 +28,7 @@ const (
 )
 
 var compactTUISpinner = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-var compactTUIPending = []rune("◷◶◵◴")
+var compactTUIPending = []rune("✶✸✹✺✹✷")
 
 type compactTaskStatus uint8
 
@@ -533,7 +533,7 @@ func (tui *compactTUI) frame(force bool) string {
 	}
 	tui.dirty = false
 	tui.spinner = (tui.spinner + 1) % len(compactTUISpinner)
-	if time.Since(tui.pendingAt) >= 400*time.Millisecond {
+	if time.Since(tui.pendingAt) >= 70*time.Millisecond {
 		tui.pending = (tui.pending + 1) % len(compactTUIPending)
 		tui.pendingAt = time.Now()
 	}

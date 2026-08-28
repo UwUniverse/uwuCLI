@@ -345,12 +345,12 @@ func TestCompactTUIPendingTaskUsesStableSpinner(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
 	first := tui.frame(true)
 	second := tui.frame(true)
-	if !strings.Contains(first, "◷ pending") || !strings.Contains(second, "◷ pending") {
+	if !strings.Contains(first, "✶ pending") || !strings.Contains(second, "✶ pending") {
 		t.Fatalf("unexpected pending marker: first=%q second=%q", first, second)
 	}
 	tui.pendingAt = time.Now().Add(-time.Second)
 	third := tui.frame(true)
-	if !strings.Contains(third, "◶ pending") {
+	if !strings.Contains(third, "✸ pending") {
 		t.Fatalf("pending marker did not advance slowly: %q", third)
 	}
 }
