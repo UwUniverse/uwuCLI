@@ -608,7 +608,14 @@ func (tui *compactTUI) frame(force bool) string {
 		output.WriteString(latest)
 		output.WriteByte('\n')
 	}
-	return output.String()
+	return strings.TrimSuffix(output.String(), "\n")
+}
+
+func compactFrameLines(frame string) int {
+	if frame == "" {
+		return 0
+	}
+	return strings.Count(frame, "\n") + 1
 }
 
 func truncateCompactDisplayLine(line string, width int) string {
@@ -634,20 +641,16 @@ func (tui *compactTUI) render(force bool) {
 	frameTop := tui.frameTop
 	frameTopSet := tui.frameTopSet
 	tui.mu.Unlock()
-	prefix := ""
-	if previousRendered > 0 {
-		if frameTopSet {
-			prefix = fmt.Sprintf("\x1b[%d;1H", frameTop)
-		} else {
-			prefix = fmt.Sprintf("\x1b[%dA\x1b[1G", previousRendered)
-		}
+	prefix := "\x1b[1G"
+	if previousRendered > 1 {
+		prefix = fmt.Sprintf("\x1b[%dA\x1b[1G", previousRendered-1)
 	}
 	var output strings.Builder
-	output.Grow(len(prefix) + len(frame) + tui.rendered*4)
+	output.Grow(len(prefix) + len(frame) + previousRendered*4)
 	output.WriteString(prefix)
-	for _, line := range strings.SplitAfter(frame, "\n") {
-		if line == "" {
-			continue
+	for index, line := range strings.Split(frame, "\n") {
+		if index > 0 {
+			output.WriteByte('\n')
 		}
 		output.WriteString("\x1b[2K\x1b[1G")
 		output.WriteString(line)
@@ -655,13 +658,15 @@ func (tui *compactTUI) render(force bool) {
 	output.WriteString("\x1b[J")
 	_, _ = io.WriteString(tui.terminal, output.String())
 	tui.mu.Lock()
-	tui.rendered = strings.Count(frame, "\n")
-	if !frameTopSet {
-		// Without a cursor-position response, keep the historical bottom anchor.
-		size := compactTerminalSize(tui.terminal)
-		if size.rows > 0 && tui.rendered > 0 {
-			tui.frameTop = int(size.rows) - tui.rendered + 1
+	tui.rendered = compactFrameLines(frame)
+	size := compactTerminalSize(tui.terminal)
+	if frameTopSet && size.rows > 0 {
+		overflow := frameTop + tui.rendered - 1 - int(size.rows)
+		if overflow > 0 {
+			tui.frameTop = max(1, frameTop-overflow)
 		}
+	} else if size.rows > 0 && tui.rendered > 0 {
+		tui.frameTop = max(1, int(size.rows)-tui.rendered+1)
 	}
 	tui.mu.Unlock()
 }
@@ -1058,6 +1063,9 @@ func (tui *compactTUI) close() {
 	tui.stopInput()
 	<-tui.done
 	tui.disableTerminal()
+	if tui.terminal != nil {
+		_, _ = io.WriteString(tui.terminal, "\r\n")
+	}
 }
 
 func (tui *compactTUI) summaryLines() []string {

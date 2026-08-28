@@ -4,6 +4,7 @@
 package uni
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,7 +79,7 @@ func TestCompactDisplayLinePreservesColorsAndProgress(t *testing.T) {
 	if !strings.Contains(frame, "\x1b[32m[100% 1/1] bootstrap blueprint\x1b[0m") {
 		t.Fatalf("frame lost colored progress line: %q", frame)
 	}
-	if !strings.HasSuffix(frame, "\x1b[0m\n") {
+	if !strings.HasSuffix(frame, "\x1b[0m") {
 		t.Fatalf("latest output is not the final TUI line: %q", frame)
 	}
 }
@@ -294,8 +295,28 @@ func TestCompactTUIFrameDoesNotClearExistingTerminalOutput(t *testing.T) {
 	if strings.Contains(frame, "\x1b[2J") || strings.Contains(frame, "\x1b[H") {
 		t.Fatalf("frame clears output printed before uni: %q", frame)
 	}
-	if !strings.HasSuffix(frame, "\n") {
-		t.Fatalf("inline frame must leave the cursor below the TUI: %q", frame)
+	if strings.HasSuffix(frame, "\n") {
+		t.Fatalf("inline frame must keep the cursor on its final row: %q", frame)
+	}
+}
+
+func TestCompactTUIRenderDoesNotScrollOnRefresh(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tui := newCompactTUI(nil, writer)
+	tui.render(true)
+	tui.render(true)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "\x1b[8A\x1b[1G") {
+		t.Fatalf("refresh did not move to the previous frame: %q", data)
 	}
 }
 
