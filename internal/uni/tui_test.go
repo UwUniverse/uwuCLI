@@ -160,25 +160,10 @@ func TestOutputLogPathSortsByTimestamp(t *testing.T) {
 	}
 }
 
-func TestCompactMessagesSupportChineseAndEnglish(t *testing.T) {
-	english := compactMessagesForLocale(false)
-	chinese := compactMessagesForLocale(true)
-	if english.header != "[Task]" || english.taskLabels["Kernel"] != "Kernel" {
-		t.Fatalf("unexpected English messages: %+v", english)
-	}
-	if chinese.header != "[任务]" || chinese.taskLabels["Kernel"] != "内核" || chinese.footer == english.footer {
-		t.Fatalf("unexpected Chinese messages: %+v", chinese)
-	}
-	if compactTextWidth(compactPadRight("内核", 9)) != 9 {
-		t.Fatal("Chinese task label is not aligned to terminal columns")
-	}
-}
-
-func TestCompactTUIChineseLocale(t *testing.T) {
-	tui := newCompactTUIForLocale(nil, nil, true)
-	frame := tui.frame(true)
-	if !strings.Contains(frame, "[任务]") || !strings.Contains(frame, "内核") || !strings.Contains(frame, "等待") {
-		t.Fatalf("TUI is not Chinese: %q", frame)
+func TestCompactMessagesAreEnglish(t *testing.T) {
+	messages := englishCompactMessages()
+	if messages.header != "[Task]" || messages.taskLabels["Kernel"] != "Kernel" {
+		t.Fatalf("unexpected messages: %+v", messages)
 	}
 }
 

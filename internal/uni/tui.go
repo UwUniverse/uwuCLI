@@ -157,26 +157,7 @@ type compactMessages struct {
 	logWarning string
 }
 
-func compactMessagesForLocale(chinese bool) compactMessages {
-	if chinese {
-		return compactMessages{
-			header:     "[任务]",
-			taskLabels: map[string]string{"Graph": "构建图", "Kernel": "内核", "Startup": "启动", "Main": "主构建"},
-			building:   "编译中",
-			pending:    "等待",
-			failed:     "失败",
-			jobs:       "并发",
-			remaining:  "剩余",
-			running:    "运行中",
-			available:  "可用",
-			memory:     "内存",
-			footer:     "↑↓ 选择   Ctrl+A 详情   Ctrl+P 复制   Ctrl+C 停止",
-			copyFooter: "复制模式   Ctrl+P 恢复   Ctrl+C 停止",
-			outputLog:  "uni: 完整输出日志: %s\n",
-			fallback:   "uni: compact TUI 已禁用，使用普通输出: %v\n",
-			logWarning: "uni: 输出日志警告: %v\n",
-		}
-	}
+func englishCompactMessages() compactMessages {
 	return compactMessages{
 		header:     "[Task]",
 		taskLabels: map[string]string{"Graph": "Graph", "Kernel": "Kernel", "Startup": "Startup", "Main": "Main"},
@@ -197,12 +178,8 @@ func compactMessagesForLocale(chinese bool) compactMessages {
 }
 
 func newCompactTUI(input, terminal *os.File) *compactTUI {
-	return newCompactTUIForLocale(input, terminal, false)
-}
-
-func newCompactTUIForLocale(input, terminal *os.File, chinese bool) *compactTUI {
 	names := []string{"Graph", "Kernel", "Startup", "Main"}
-	messages := compactMessagesForLocale(chinese)
+	messages := englishCompactMessages()
 	tui := &compactTUI{
 		terminal:     terminal,
 		input:        input,
@@ -1191,7 +1168,7 @@ func RunWithCompactTUI(ctx context.Context, options Options) (runErr error) {
 	if err != nil {
 		return Run(ctx, options)
 	}
-	messages := compactMessagesForLocale(false)
+	messages := englishCompactMessages()
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, messages.fallback, err)
 		return Run(ctx, options)
@@ -1220,7 +1197,7 @@ func RunWithCompactTUI(ctx context.Context, options Options) (runErr error) {
 	}
 
 	originalStdout, originalStderr := os.Stdout, os.Stderr
-	tui := newCompactTUIForLocale(os.Stdin, originalStdout, true)
+	tui := newCompactTUI(os.Stdin, originalStdout)
 	tui.interrupt = func() {
 		if process, err := os.FindProcess(os.Getpid()); err == nil {
 			_ = process.Signal(os.Interrupt)
