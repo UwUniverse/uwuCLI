@@ -49,6 +49,7 @@ type State struct {
 	BuildDateTime     string      `json:"build_date_time"`
 	BuildDateTimeFile string      `json:"build_date_time_file"`
 	KatiSuffix        string      `json:"kati_suffix"`
+	SkipKatiNinja     bool        `json:"skip_kati_ninja"`
 	CombinedNinja     string      `json:"combined_ninja"`
 	SoongNinja        string      `json:"soong_ninja"`
 	SoongVariables    string      `json:"soong_variables"`
@@ -61,6 +62,7 @@ type State struct {
 	AllModules        []string    `json:"all_modules"`
 	R8Modules         []string    `json:"r8_modules"`
 	R8ModulesReady    bool        `json:"r8_modules_ready"`
+	TaskMetadata      string      `json:"task_metadata,omitempty"`
 	Dist              bool        `json:"dist"`
 	GraphFingerprint  string      `json:"graph_fingerprint"`
 	GraphFiles        []GraphFile `json:"graph_files"`
@@ -287,7 +289,7 @@ func ReuseState(path, sourceRoot, outDir, product, release, variant string, opti
 // prepared graph can be recovered after lunch or an interrupted analysis.
 func ForceReuseState(path, sourceRoot, outDir, product, release, variant string, options Options) (State, bool, error) {
 	if len(options.KeyValues) != 0 {
-		return State{}, false, fmt.Errorf("--uni-force-reuse cannot be combined with product variable overrides")
+		return State{}, false, fmt.Errorf("--force-reuse cannot be combined with product variable overrides")
 	}
 	state, err := LoadState(path)
 	if err != nil {
@@ -778,15 +780,60 @@ func HasNinjaTarget(path, target string) (bool, error) {
 	}
 }
 
-func EarlyKernelTarget(path string) (string, error) {
-	for _, target := range []string{"kernel", "bootimage"} {
-		found, err := HasNinjaTarget(path, target)
-		if err != nil {
-			return "", err
+func ninjaTargetRuleAndInputs(path, target string) (string, []string, bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", nil, false, err
+	}
+	defer file.Close()
+	prefix := "build " + target + ":"
+	reader := bufio.NewReaderSize(file, 1024*1024)
+	for {
+		line, readErr := reader.ReadString('\n')
+		if strings.HasPrefix(line, prefix) {
+			fields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, prefix)))
+			if len(fields) == 0 {
+				return "", nil, true, nil
+			}
+			inputs := make([]string, 0, len(fields)-1)
+			for _, field := range fields[1:] {
+				if field == "|" || field == "||" {
+					break
+				}
+				inputs = append(inputs, field)
+			}
+			return fields[0], inputs, true, nil
 		}
-		if found {
-			return target, nil
+		if readErr != nil {
+			if readErr == io.EOF {
+				return "", nil, false, nil
+			}
+			return "", nil, false, readErr
 		}
 	}
-	return "", nil
+}
+
+// EarlyKernelTargets returns the public kernel goal and the real output behind
+// its phony edge. Siso ignores weights on phony targets, so scheduling must use
+// the real output while the command line keeps the public goal.
+func EarlyKernelTargets(path string) (goal, priority string, err error) {
+	for _, target := range []string{"kernel", "bootimage"} {
+		rule, inputs, found, inspectErr := ninjaTargetRuleAndInputs(path, target)
+		if inspectErr != nil {
+			return "", "", inspectErr
+		}
+		if !found {
+			continue
+		}
+		if rule == "phony" && len(inputs) > 0 {
+			return target, inputs[0], nil
+		}
+		return target, target, nil
+	}
+	return "", "", nil
+}
+
+func EarlyKernelTarget(path string) (string, error) {
+	goal, _, err := EarlyKernelTargets(path)
+	return goal, err
 }
