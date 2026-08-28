@@ -127,9 +127,10 @@ type compactTUI struct {
 	summaries    []string
 	messages     compactMessages
 
-	stop chan struct{}
-	done chan struct{}
-	once sync.Once
+	stop      chan struct{}
+	done      chan struct{}
+	once      sync.Once
+	interrupt func()
 }
 
 type compactMessages struct {
@@ -663,7 +664,7 @@ func (tui *compactTUI) animate() {
 }
 
 func (tui *compactTUI) start() {
-	_, _ = io.WriteString(tui.terminal, "\x1b[?25l\x1b[?1000h\x1b[?1006h")
+	_, _ = io.WriteString(tui.terminal, "\x1b[>1u\x1b[?25l\x1b[?1000h\x1b[?1006h")
 	tui.render(true)
 	go tui.inputLoop()
 	go func() {
@@ -770,13 +771,20 @@ func (tui *compactTUI) handleInput(input []byte) []byte {
 					if len(fields) >= 2 {
 						code, codeErr := strconv.Atoi(fields[0])
 						modifiers, modifierErr := strconv.Atoi(fields[1])
-						if codeErr == nil && modifierErr == nil && code == int('a') && modifiers&4 != 0 {
-							tui.mu.Lock()
-							tui.details = !tui.details
-							tui.scrollOffset = 0
-							tui.scrollPaused = false
-							tui.dirty = true
-							tui.mu.Unlock()
+						if codeErr == nil && modifierErr == nil && modifiers&4 != 0 {
+							switch code {
+							case int('a'):
+								tui.mu.Lock()
+								tui.details = !tui.details
+								tui.scrollOffset = 0
+								tui.scrollPaused = false
+								tui.dirty = true
+								tui.mu.Unlock()
+							case int('c'):
+								if tui.interrupt != nil {
+									tui.interrupt()
+								}
+							}
 						}
 					}
 				} else if strings.HasSuffix(sequence, "M") || strings.HasSuffix(sequence, "m") {
@@ -940,7 +948,7 @@ func (tui *compactTUI) finish(err error) {
 func (tui *compactTUI) close() {
 	tui.once.Do(func() { close(tui.stop) })
 	<-tui.done
-	_, _ = io.WriteString(tui.terminal, "\x1b[?1006l\x1b[?1000l\x1b[?25h")
+	_, _ = io.WriteString(tui.terminal, "\x1b[?1006l\x1b[?1000l\x1b[<u\x1b[?25h")
 }
 
 func (tui *compactTUI) summaryLines() []string {
@@ -1060,6 +1068,11 @@ func RunWithCompactTUI(ctx context.Context, options Options) (runErr error) {
 
 	originalStdout, originalStderr := os.Stdout, os.Stderr
 	tui := newCompactTUI(os.Stdin, originalStdout)
+	tui.interrupt = func() {
+		if process, err := os.FindProcess(os.Getpid()); err == nil {
+			_ = process.Signal(os.Interrupt)
+		}
+	}
 	captured := make(chan error, 1)
 	go func() { captured <- captureCompactOutput(reader, logFile, tui) }()
 	os.Stdout, os.Stderr = writer, writer
