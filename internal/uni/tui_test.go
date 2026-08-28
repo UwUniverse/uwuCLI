@@ -313,6 +313,38 @@ func TestCompactTUIRenderDoesNotScrollOnRefresh(t *testing.T) {
 	}
 }
 
+func TestCompactTUIClearRenderedFrameRemovesDashboard(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tui := newCompactTUI(nil, writer)
+	tui.render(true)
+	tui.clearRenderedFrame()
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(string(data), "\r\x1b[8A\x1b[J") {
+		t.Fatalf("dashboard was not cleared before final output: %q", data)
+	}
+	if tui.rendered != 0 {
+		t.Fatalf("rendered lines remain after clear: %d", tui.rendered)
+	}
+}
+
+func TestCompactTUISuccessSummaryKeepsColor(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	tui.consume("\x1b[0;32m#### build completed successfully (03:40:09 (hh:mm:ss)) ####\x1b[0m")
+	got := strings.Join(tui.summaryLines(), "\n")
+	if !strings.Contains(got, "\x1b[0;32m") || !strings.Contains(got, "\x1b[0m") {
+		t.Fatalf("success summary lost color: %q", got)
+	}
+}
+
 func TestCompactTUIFrameReservesTerminalColumn(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
 	tui.phaseStarted("graph-analysis", 18)

@@ -313,7 +313,11 @@ func (tui *compactTUI) consume(line string) {
 	}
 	if strings.HasPrefix(line, "uni: phases=") || strings.HasPrefix(line, "uni: package=") ||
 		strings.HasPrefix(line, "uni: output=") || strings.HasPrefix(line, "#### build completed successfully") {
-		tui.summaries = append(tui.summaries, line)
+		summary := line
+		if strings.HasPrefix(line, "#### build completed successfully") && displayLine != "" {
+			summary = displayLine
+		}
+		tui.summaries = append(tui.summaries, summary)
 	}
 	if strings.HasPrefix(line, "FAILED:") || strings.HasPrefix(line, "FAILED ") || strings.Contains(line, "ninja failed") {
 		tui.summaries = append(tui.summaries, line)
@@ -1087,10 +1091,28 @@ func (tui *compactTUI) finish(err error) {
 func (tui *compactTUI) close() {
 	tui.stopInput()
 	<-tui.done
+	tui.clearRenderedFrame()
 	tui.disableTerminal()
-	if tui.terminal != nil {
-		_, _ = io.WriteString(tui.terminal, "\r\n")
+}
+
+func (tui *compactTUI) clearRenderedFrame() {
+	if tui == nil || tui.terminal == nil {
+		return
 	}
+	tui.renderMu.Lock()
+	defer tui.renderMu.Unlock()
+	tui.mu.Lock()
+	rendered := tui.rendered
+	tui.rendered = 0
+	tui.mu.Unlock()
+	if rendered < 1 {
+		return
+	}
+	if rendered == 1 {
+		_, _ = io.WriteString(tui.terminal, "\r\x1b[J")
+		return
+	}
+	_, _ = fmt.Fprintf(tui.terminal, "\r\x1b[%dA\x1b[J", rendered-1)
 }
 
 func (tui *compactTUI) summaryLines() []string {
