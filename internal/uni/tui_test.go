@@ -269,6 +269,25 @@ func TestCompactTUIMouseClickSelectsTask(t *testing.T) {
 	}
 }
 
+func TestCompactTUICursorReportAnchorsMouseRows(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	tui.rendered = 11
+	tui.frameTop = 20
+	tui.frameTopSet = true
+	if pending := tui.handleInput([]byte("\x1b[20;1R")); len(pending) != 0 {
+		t.Fatalf("cursor report was not consumed: %q", pending)
+	}
+	if got := <-tui.cursorReport; got != 20 {
+		t.Fatalf("cursor row=%d, want 20", got)
+	}
+	if pending := tui.handleInput([]byte("\x1b[<0;10;21M")); len(pending) != 0 {
+		t.Fatalf("mouse click was not consumed: %q", pending)
+	}
+	if tui.selected != 0 {
+		t.Fatalf("anchored click selected=%d, want 0", tui.selected)
+	}
+}
+
 func TestCompactTUIFrameDoesNotClearExistingTerminalOutput(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
 	frame := tui.frame(true)

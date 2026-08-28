@@ -122,6 +122,9 @@ type compactTUI struct {
 	spinner      int
 	dirty        bool
 	rendered     int
+	frameTop     int
+	frameTopSet  bool
+	cursorReport chan int
 	scrollPaused bool
 	scrollOffset int
 	summaries    []string
@@ -201,13 +204,14 @@ func newCompactTUI(input, terminal *os.File) *compactTUI {
 	names := []string{"Graph", "Kernel", "Startup", "Main"}
 	messages := compactMessagesForLocale(false)
 	tui := &compactTUI{
-		terminal: terminal,
-		input:    input,
-		byName:   make(map[string]*compactTask, len(names)),
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
-		dirty:    true,
-		messages: messages,
+		terminal:     terminal,
+		input:        input,
+		byName:       make(map[string]*compactTask, len(names)),
+		stop:         make(chan struct{}),
+		done:         make(chan struct{}),
+		cursorReport: make(chan int, 1),
+		dirty:        true,
+		messages:     messages,
 	}
 	for _, name := range names {
 		task := &compactTask{name: name, label: messages.taskLabels[name], status: compactTaskPending, logs: newCompactRing(compactTUILogLines)}
@@ -625,9 +629,18 @@ func (tui *compactTUI) render(force bool) {
 	if frame == "" || tui.terminal == nil {
 		return
 	}
+	tui.mu.Lock()
+	previousRendered := tui.rendered
+	frameTop := tui.frameTop
+	frameTopSet := tui.frameTopSet
+	tui.mu.Unlock()
 	prefix := ""
-	if tui.rendered > 0 {
-		prefix = fmt.Sprintf("\x1b[%dA\x1b[1G", tui.rendered)
+	if previousRendered > 0 {
+		if frameTopSet {
+			prefix = fmt.Sprintf("\x1b[%d;1H", frameTop)
+		} else {
+			prefix = fmt.Sprintf("\x1b[%dA\x1b[1G", previousRendered)
+		}
 	}
 	var output strings.Builder
 	output.Grow(len(prefix) + len(frame) + tui.rendered*4)
@@ -643,6 +656,13 @@ func (tui *compactTUI) render(force bool) {
 	_, _ = io.WriteString(tui.terminal, output.String())
 	tui.mu.Lock()
 	tui.rendered = strings.Count(frame, "\n")
+	if !frameTopSet {
+		// Without a cursor-position response, keep the historical bottom anchor.
+		size := compactTerminalSize(tui.terminal)
+		if size.rows > 0 && tui.rendered > 0 {
+			tui.frameTop = int(size.rows) - tui.rendered + 1
+		}
+	}
 	tui.mu.Unlock()
 }
 
@@ -667,9 +687,17 @@ func (tui *compactTUI) animate() {
 }
 
 func (tui *compactTUI) start() {
-	_, _ = io.WriteString(tui.terminal, "\x1b[>1u\x1b[?25l\x1b[?1000h\x1b[?1006h")
-	tui.render(true)
+	_, _ = io.WriteString(tui.terminal, "\x1b[>1u\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[6n")
 	go tui.inputLoop()
+	select {
+	case row := <-tui.cursorReport:
+		tui.mu.Lock()
+		tui.frameTop = row
+		tui.frameTopSet = row > 0
+		tui.mu.Unlock()
+	case <-time.After(100 * time.Millisecond):
+	}
+	tui.render(true)
 	go func() {
 		defer close(tui.done)
 		ticker := time.NewTicker(compactTUIRefreshInterval)
@@ -802,7 +830,18 @@ func (tui *compactTUI) handleInput(input []byte) []byte {
 				}
 				sequence := string(input[2 : final+1])
 				handled := false
-				if strings.HasSuffix(sequence, "u") {
+				if strings.HasSuffix(sequence, "R") {
+					handled = true
+					fields := strings.Split(sequence[:len(sequence)-1], ";")
+					if len(fields) >= 1 {
+						if row, rowErr := strconv.Atoi(fields[0]); rowErr == nil && row > 0 {
+							select {
+							case tui.cursorReport <- row:
+							default:
+							}
+						}
+					}
+				} else if strings.HasSuffix(sequence, "u") {
 					handled = true
 					// Kitty keyboard protocol encodes Ctrl+A as CSI 97;5u.
 					fields := strings.Split(strings.TrimSuffix(sequence, "u"), ";")
@@ -928,16 +967,18 @@ func (tui *compactTUI) handleMouseEvent(button, _, y int, release bool) {
 	if release || (button != 0 && button != 2) {
 		return
 	}
-	size := compactTerminalSize(tui.terminal)
 	tui.mu.Lock()
 	defer tui.mu.Unlock()
 	if tui.rendered <= 0 {
 		return
 	}
-	// The rendered frame is anchored above the cursor. Coordinates are
-	// one-based, while the task rows start after the header.
-	top := int(size.rows) - tui.rendered
-	index := y - (top + 2)
+	top := tui.frameTop
+	if !tui.frameTopSet {
+		size := compactTerminalSize(tui.terminal)
+		top = int(size.rows) - tui.rendered + 1
+	}
+	// Coordinates and frame rows are one-based; the header occupies top.
+	index := y - (top + 1)
 	if index < 0 || index >= len(tui.tasks) {
 		return
 	}
