@@ -5,21 +5,21 @@ package uni
 
 import (
 	"fmt"
-	"math"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 )
 
 const (
-	defaultBatchSize = 500
-	minimumBatchSize = 350
-	maximumBatchSize = 4096
-	gibibyte         = 1024 * 1024 * 1024
+	defaultBatchSize          = maximumBatchSize
+	minimumBatchSize          = 350
+	maximumBatchSize          = 4096
+	automaticMaximumBatchSize = maximumBatchSize
+	gibibyte                  = 1024 * 1024 * 1024
 )
 
 type Options struct {
+	RawArgs        []string
 	BuildArgs      []string
 	KeyValues      []string
 	KeepGoing      int
@@ -40,36 +40,78 @@ type Options struct {
 	TrustOutput    bool
 	AssumeExisting bool
 	ForceReuse     bool
+	CleanLogs      bool
 	Targets        []string
 }
 
 func Usage() string {
-	return `Usage: uni [m options] [targets...]
+	locale := ""
+	for _, name := range []string{"LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"} {
+		if locale = strings.TrimSpace(os.Getenv(name)); locale != "" {
+			break
+		}
+	}
+	if strings.HasPrefix(strings.ToLower(locale), "zh") {
+		return usageChinese
+	}
+	return usageEnglish
+}
 
-uni prepares Soong and Kati once, then schedules Ninja in memory-aware segments.
-Normal m behavior is unchanged.
+const usageEnglish = `Usage: uni [options] [targets...]
 
-uni options:
-  --uni-batch-size=N       Initial package targets per segment (350-4096; default 500)
-  --uni-static             Disable dynamic batch and job adjustment
-  --uni-plan               Prepare the graph and print the schedule without running Ninja
-  --uni-trust-output       Keep all recovered Ninja outputs without validation
-  --uni-assume-existing    Trust existing outputs when Ninja log entries are missing
-  --uni-force-reuse        Reuse the prepared graph without source freshness checks
-  --debug                   Write a concise build debug report into OUT_DIR
-  -dev                      Force a complete R8 index scan from Ninja files
-  -dev_1                    Persist automatic R8 index refresh
-  -dev_0                    Disable automatic R8 index refresh
-  -h, --help               Show this help
+Options:
+  -j N, -jN            Run up to N jobs in parallel
+  -k N, -kN            Keep going until N jobs fail; -k means no limit
+  -l N, -lN            Start jobs only while load average is below N
+  --batch-size=N       Set targets per segment (350-4096; default 4096)
+  --static             Use a fixed schedule (compatibility option)
+  --plan               Print the schedule without running Ninja
+  --trust-output       Skip recovered output validation
+  --assume-existing    Accept outputs missing from the Ninja log
+  --force-reuse        Reuse the graph without source freshness checks
+  --debug              Write a detailed report to OUT_DIR (default)
+  --no-debug           Disable the detailed report for this run
+  --clean-logs         Remove build logs without touching build outputs
+  --dev                Rebuild the R8 index for this run
+  --dev-auto           Enable automatic R8 index refresh
+  --no-dev-auto        Disable automatic R8 index refresh
+  showcommands         Print executed build commands
+  -h, --help           Show this help
 
 Examples:
+  uni
   uni -j8 otapackage
-  uni -j8 -dev otapackage
-  uni -j8 -dev_1 otapackage
   uni SystemUI
-  uni dist
+  uni --debug -j8 otapackage
 `
-}
+
+const usageChinese = `用法: uni [选项] [目标...]
+
+选项:
+  -j N, -jN            最多并行执行 N 个任务
+  -k N, -kN            失败 N 个任务后停止；-k 表示不限制
+  -l N, -lN            系统负载低于 N 时才启动新任务
+  --batch-size=N       设置每段目标数（350-4096，默认 4096）
+  --static             使用固定调度（兼容选项）
+  --plan               输出调度计划，不执行 Ninja
+  --trust-output       跳过恢复产物校验
+  --assume-existing    接受 Ninja 日志中缺失的已有产物
+  --force-reuse        跳过源码新鲜度检查并复用构建图
+  --debug              在 OUT_DIR 写入详细调试报告（默认开启）
+  --no-debug           本次关闭详细调试报告
+  --clean-logs         清理构建日志，不删除编译产物
+  --dev                本次重新生成 R8 索引
+  --dev-auto           开启 R8 索引自动刷新
+  --no-dev-auto        关闭 R8 索引自动刷新
+  showcommands         输出实际执行的构建命令
+  -h, --help           显示帮助
+
+示例:
+  uni
+  uni -j8 otapackage
+  uni SystemUI
+  uni --debug -j8 otapackage
+`
 
 func parsePositiveInt(value, name string) (int, error) {
 	n, err := strconv.Atoi(value)
@@ -111,44 +153,101 @@ func customValue(args []string, index *int, name string) (string, bool, error) {
 	return args[*index], true, nil
 }
 
+func normalizeSingleDashOptions(args []string) []string {
+	aliases := map[string]string{
+		"-batch-size":      "--batch-size",
+		"-static":          "--static",
+		"-plan":            "--plan",
+		"-trust-output":    "--trust-output",
+		"-assume-existing": "--assume-existing",
+		"-force-reuse":     "--force-reuse",
+		"-debug":           "--debug",
+		"-no-debug":        "--no-debug",
+		"-dev":             "--dev",
+		"-dev-auto":        "--dev-auto",
+		"-no-dev-auto":     "--no-dev-auto",
+		"-load-average":    "--load-average",
+		"-clean-logs":      "--clean-logs",
+	}
+	normalized := append([]string(nil), args...)
+	for index, arg := range normalized {
+		name := arg
+		suffix := ""
+		if separator := strings.IndexByte(name, '='); separator >= 0 {
+			suffix = name[separator:]
+			name = name[:separator]
+		}
+		if replacement, ok := aliases[name]; ok {
+			normalized[index] = replacement + suffix
+		}
+	}
+	return normalized
+}
+
 func ParseOptions(args []string) (Options, error) {
 	options := Options{
 		BatchSize: defaultBatchSize,
 		KeepGoing: 1,
+		RawArgs:   append([]string(nil), args...),
+		Debug:     true,
+	}
+	args = normalizeSingleDashOptions(args)
+	legacyOptions := map[string]string{
+		"--uni-static":          "--static",
+		"--uni-plan":            "--plan",
+		"--uni-trust-output":    "--trust-output",
+		"--uni-assume-existing": "--assume-existing",
+		"--uni-force-reuse":     "--force-reuse",
+		"--uni-batch-size":      "--batch-size",
+		"-dev_1":                "--dev-auto",
+		"-dev_0":                "--no-dev-auto",
 	}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		legacyName := arg
+		if index := strings.IndexByte(legacyName, '='); index >= 0 {
+			legacyName = legacyName[:index]
+		}
+		if replacement, legacy := legacyOptions[legacyName]; legacy {
+			return Options{}, fmt.Errorf("%s was renamed to %s", legacyName, replacement)
+		}
 		switch arg {
-		case "-h", "--help":
+		case "-h", "-help", "--help":
 			options.Help = true
 			continue
-		case "--uni-static":
+		case "--static":
 			options.Static = true
 			continue
-		case "--uni-plan":
+		case "--plan":
 			options.Plan = true
 			continue
-		case "--uni-trust-output":
+		case "--trust-output":
 			options.TrustOutput = true
 			continue
-		case "--uni-assume-existing":
+		case "--assume-existing":
 			options.AssumeExisting = true
 			options.TrustOutput = true
 			continue
-		case "--uni-force-reuse":
+		case "--force-reuse":
 			options.ForceReuse = true
 			continue
 		case "--debug":
 			options.Debug = true
 			continue
-		case "-dev":
+		case "--no-debug":
+			options.Debug = false
+			continue
+		case "--clean-logs":
+			options.CleanLogs = true
+			continue
+		case "--dev":
 			options.Dev = true
 			continue
-		case "-dev_1":
+		case "--dev-auto":
 			options.DevAuto = true
 			options.DevAutoSet = true
 			continue
-		case "-dev_0":
+		case "--no-dev-auto":
 			options.DevAuto = false
 			options.DevAutoSet = true
 			continue
@@ -156,7 +255,7 @@ func ParseOptions(args []string) (Options, error) {
 			options.ShowCommands = true
 			continue
 		}
-		if value, matched, err := customValue(args, &i, "--uni-batch-size"); matched {
+		if value, matched, err := customValue(args, &i, "--batch-size"); matched {
 			if err != nil {
 				return Options{}, err
 			}
@@ -255,7 +354,12 @@ func ParseOptions(args []string) (Options, error) {
 		options.Targets = append(options.Targets, arg)
 	}
 
-	if len(options.Targets) == 0 {
+	if options.CleanLogs && len(options.BuildArgs) > 0 {
+		return Options{}, fmt.Errorf("--clean-logs cannot be combined with build arguments")
+	}
+	if options.CleanLogs {
+		options.FullBuild = false
+	} else if len(options.Targets) == 0 {
 		options.FullBuild = true
 	} else {
 		for _, target := range options.Targets {
@@ -266,20 +370,9 @@ func ParseOptions(args []string) (Options, error) {
 		}
 	}
 	if options.Dev && options.DevAutoSet && options.DevAuto {
-		return Options{}, fmt.Errorf("-dev and -dev_1 cannot be used together")
+		return Options{}, fmt.Errorf("--dev and --dev-auto cannot be used together")
 	}
 	return options, nil
-}
-
-func automaticNinjaLoadLimit(jobs, cpus int) int {
-	if cpus < 1 {
-		cpus = 1
-	}
-	if jobs < 1 {
-		jobs = cpus
-	}
-	active := min(jobs, cpus)
-	return max(active+2, int(math.Ceil(float64(active)*1.5)))
 }
 
 func ninjaArgsHaveLoadLimit(value string) bool {
@@ -318,7 +411,10 @@ func appendNinjaArgument(keyValues []string, argument string) []string {
 	return append(keyValues, entry)
 }
 
-func addNinjaLoadLimit(options Options, keyValues []string, jobs int) []string {
+func addNinjaLoadLimit(options Options, keyValues []string) []string {
+	if !options.LoadSet {
+		return keyValues
+	}
 	ninjaArgs, _, found := keyValue(keyValues, "NINJA_ARGS")
 	if !found {
 		ninjaArgs = os.Getenv("NINJA_ARGS")
@@ -330,11 +426,7 @@ func addNinjaLoadLimit(options Options, keyValues []string, jobs int) []string {
 	if ninjaArgsHaveLoadLimit(ninjaArgs) || ninjaArgsHaveLoadLimit(extraArgs) {
 		return keyValues
 	}
-	loadAverage := options.LoadAverage
-	if !options.LoadSet {
-		loadAverage = float64(automaticNinjaLoadLimit(jobs, runtime.NumCPU()))
-	}
-	argument := "-l " + strconv.FormatFloat(loadAverage, 'f', -1, 64)
+	argument := "-l " + strconv.FormatFloat(options.LoadAverage, 'f', -1, 64)
 	return appendNinjaArgument(keyValues, argument)
 }
 
@@ -356,7 +448,7 @@ func phaseArgs(options Options, targets []string, jobs int, dist bool) []string 
 		args = append(args, "-k"+strconv.Itoa(options.KeepGoing))
 	}
 	keyValues := append([]string(nil), options.KeyValues...)
-	keyValues = addNinjaLoadLimit(options, keyValues, jobs)
+	keyValues = addNinjaLoadLimit(options, keyValues)
 	if options.AssumeExisting {
 		keyValues = appendNinjaArgument(keyValues, "-d assumeexisting")
 	}

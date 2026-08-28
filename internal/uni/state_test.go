@@ -9,10 +9,51 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestLoadSoongStateProtocolFixture(t *testing.T) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate test source")
+	}
+	fixture := filepath.Join(filepath.Dir(sourceFile), "..", "..", "..", "build", "soong", "ui", "build", "testdata", "uni_state_v7.json")
+	state, err := LoadState(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Version != stateVersion {
+		t.Fatalf("Soong state version = %d, want %d", state.Version, stateVersion)
+	}
+	if !state.SkipKatiNinja {
+		t.Fatal("CLI lost Soong SkipKatiNinja")
+	}
+	if state.TaskMetadata == "" {
+		t.Fatal("CLI lost Soong task metadata path")
+	}
+	roundTrip := filepath.Join(t.TempDir(), "state.json")
+	if err := SaveState(roundTrip, state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadState(roundTrip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.SkipKatiNinja || loaded.TaskMetadata != state.TaskMetadata {
+		t.Fatal("CLI state round trip lost protocol fields")
+	}
+}
+
+func TestStateValidationRejectsOldProtocol(t *testing.T) {
+	state := State{Version: stateVersion - 1}
+	if err := state.Validate("", "", ""); err == nil || !strings.Contains(err.Error(), "unsupported state version 6") {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+}
 
 func TestProductTargetsAndStableShuffle(t *testing.T) {
 	state := State{
@@ -428,13 +469,15 @@ func TestNinjaTarget(t *testing.T) {
 
 func TestEarlyKernelTarget(t *testing.T) {
 	tests := []struct {
-		name string
-		data string
-		want string
+		name     string
+		data     string
+		goal     string
+		priority string
 	}{
-		{name: "source kernel", data: "build bootimage: phony out/boot.img\nbuild kernel: phony out/kernel\n", want: "kernel"},
-		{name: "GKI boot image", data: "build bootimage: phony out/boot.img\n", want: "bootimage"},
-		{name: "no early target", data: "build droid: phony out/system.img\n", want: ""},
+		{name: "source kernel", data: "build bootimage: phony out/boot.img\nbuild kernel: phony out/kernel | implicit || order\n", goal: "kernel", priority: "out/kernel"},
+		{name: "GKI boot image", data: "build bootimage: phony out/boot.img\n", goal: "bootimage", priority: "out/boot.img"},
+		{name: "real kernel target", data: "build kernel: kernel_rule source\n", goal: "kernel", priority: "kernel"},
+		{name: "no early target", data: "build droid: phony out/system.img\n"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -442,12 +485,16 @@ func TestEarlyKernelTarget(t *testing.T) {
 			if err := os.WriteFile(path, []byte(test.data), 0600); err != nil {
 				t.Fatal(err)
 			}
-			got, err := EarlyKernelTarget(path)
+			goal, priority, err := EarlyKernelTargets(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got != test.want {
-				t.Fatalf("got %q, want %q", got, test.want)
+			if goal != test.goal || priority != test.priority {
+				t.Fatalf("got goal=%q priority=%q, want goal=%q priority=%q", goal, priority, test.goal, test.priority)
+			}
+			legacyGoal, err := EarlyKernelTarget(path)
+			if err != nil || legacyGoal != test.goal {
+				t.Fatalf("EarlyKernelTarget() = %q, %v", legacyGoal, err)
 			}
 		})
 	}

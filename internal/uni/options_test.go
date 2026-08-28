@@ -5,13 +5,14 @@ package uni
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
 func TestParseOptionsFullBuild(t *testing.T) {
 	options, err := ParseOptions([]string{
-		"-j", "12", "-k3", "--uni-batch-size=550",
-		"-l", "18.5", "--debug", "-dev", "--uni-assume-existing", "FOO=bar", "otapackage", "dist",
+		"-j", "12", "-k3", "--batch-size=550",
+		"-l", "18.5", "--debug", "--dev", "--assume-existing", "FOO=bar", "otapackage", "dist",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -45,13 +46,39 @@ func TestParseOptionsModuleBuild(t *testing.T) {
 	if options.FullBuild {
 		t.Fatal("module build was classified as a full build")
 	}
+	if !options.Debug {
+		t.Fatal("debug report is not enabled by default")
+	}
 	if !reflect.DeepEqual(options.Targets, []string{"SystemUI"}) {
 		t.Fatalf("unexpected targets: %v", options.Targets)
 	}
 }
 
+func TestParseOptionsCanDisableDebugReport(t *testing.T) {
+	options, err := ParseOptions([]string{"--no-debug", "SystemUI"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.Debug {
+		t.Fatal("debug report remained enabled")
+	}
+}
+
+func TestParseOptionsCleanLogs(t *testing.T) {
+	options, err := ParseOptions([]string{"--clean-logs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.CleanLogs || options.FullBuild || len(options.BuildArgs) != 0 {
+		t.Fatalf("unexpected clean-log options: %+v", options)
+	}
+	if _, err := ParseOptions([]string{"--clean-logs", "otapackage"}); err == nil {
+		t.Fatal("clean-log command accepted a build target")
+	}
+}
+
 func TestParseOptionsAutomaticDeveloperMode(t *testing.T) {
-	options, err := ParseOptions([]string{"-dev_1", "otapackage"})
+	options, err := ParseOptions([]string{"--dev-auto", "otapackage"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,10 +91,10 @@ func TestParseOptionsAutomaticDeveloperMode(t *testing.T) {
 	if !reflect.DeepEqual(options.BuildArgs, []string{"otapackage"}) {
 		t.Fatalf("automatic developer option leaked into build arguments: %v", options.BuildArgs)
 	}
-	if _, err := ParseOptions([]string{"-dev", "-dev_1"}); err == nil {
+	if _, err := ParseOptions([]string{"--dev", "--dev-auto"}); err == nil {
 		t.Fatal("conflicting developer options were accepted")
 	}
-	disabled, err := ParseOptions([]string{"-dev_0", "otapackage"})
+	disabled, err := ParseOptions([]string{"--no-dev-auto", "otapackage"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,12 +144,64 @@ func TestParseOptionsDefaultAndDistAreFullBuilds(t *testing.T) {
 		if !options.FullBuild {
 			t.Fatalf("%v was not classified as a full build", args)
 		}
+		if options.BatchSize != defaultBatchSize {
+			t.Fatalf("default batch size = %d, want %d", options.BatchSize, defaultBatchSize)
+		}
 	}
 }
 
 func TestParseOptionsRejectsInvalidBatch(t *testing.T) {
-	if _, err := ParseOptions([]string{"--uni-batch-size=100"}); err == nil {
+	if _, err := ParseOptions([]string{"--batch-size=100"}); err == nil {
 		t.Fatal("invalid batch size was accepted")
+	}
+}
+
+func TestParseOptionsRejectsRenamedOptions(t *testing.T) {
+	for _, option := range []string{"--uni-plan", "--uni-batch-size=500", "-dev_1"} {
+		if _, err := ParseOptions([]string{option}); err == nil {
+			t.Fatalf("renamed option %q was accepted", option)
+		}
+	}
+}
+
+func TestHelpOptionAndLocale(t *testing.T) {
+	options, err := ParseOptions([]string{"-help"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.Help || len(options.BuildArgs) != 0 {
+		t.Fatalf("unexpected help options: %+v", options)
+	}
+	for _, name := range []string{"LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("LANG", "zh_CN.UTF-8")
+	if help := Usage(); !strings.Contains(help, "用法: uni") || !strings.Contains(help, "--help") {
+		t.Fatalf("unexpected Chinese help:\n%s", help)
+	}
+	t.Setenv("LC_ALL", "C")
+	if help := Usage(); !strings.Contains(help, "Usage: uni") || strings.Contains(help, "用法: uni") {
+		t.Fatalf("unexpected English help:\n%s", help)
+	}
+}
+
+func TestSingleDashLongOptions(t *testing.T) {
+	options, err := ParseOptions([]string{
+		"-batch-size=600", "-static", "-plan", "-trust-output", "-assume-existing",
+		"-force-reuse", "-debug", "-dev", "-load-average", "12", "otapackage",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.BatchSize != 600 || !options.Static || !options.Plan || !options.TrustOutput ||
+		!options.AssumeExisting || !options.ForceReuse || !options.Debug || !options.Dev ||
+		!options.LoadSet || options.LoadAverage != 12 {
+		t.Fatalf("unexpected single-dash options: %+v", options)
+	}
+	for _, args := range [][]string{{"-dev-auto"}, {"-no-dev-auto"}} {
+		if _, err := ParseOptions(args); err != nil {
+			t.Fatalf("single-dash option %q failed: %v", args[0], err)
+		}
 	}
 }
 
@@ -141,15 +220,11 @@ func TestParseOptionsLoadAverage(t *testing.T) {
 	}
 }
 
-func TestAutomaticNinjaLoadLimit(t *testing.T) {
-	for _, test := range []struct {
-		jobs int
-		cpus int
-		want int
-	}{{18, 18, 27}, {14, 18, 21}, {32, 18, 27}, {1, 18, 3}} {
-		if got := automaticNinjaLoadLimit(test.jobs, test.cpus); got != test.want {
-			t.Fatalf("jobs=%d cpus=%d: got %d, want %d", test.jobs, test.cpus, got, test.want)
-		}
+func TestPhaseArgsDoesNotAddAutomaticLoadLimit(t *testing.T) {
+	options := Options{KeepGoing: 1}
+	want := []string{"-j18", "droid"}
+	if got := phaseArgs(options, []string{"droid"}, 18, false); !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
 	}
 }
 
