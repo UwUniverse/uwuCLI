@@ -348,14 +348,15 @@ func TestCompactTUIRunningTaskUsesSpinner(t *testing.T) {
 	}
 }
 
-func TestCompactTUIPendingTaskUsesCircle(t *testing.T) {
+func TestCompactTUIPendingTaskUsesMoonPhases(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
-	frame := tui.frame(true)
-	if !strings.Contains(frame, "○ pending") {
-		t.Fatalf("unexpected pending marker: %q", frame)
+	first := tui.frame(true)
+	second := tui.frame(true)
+	if !strings.Contains(first, "🌒 pending") || !strings.Contains(second, "🌓 pending") {
+		t.Fatalf("unexpected pending phases: first=%q second=%q", first, second)
 	}
-	if strings.Contains(frame, "🌒") || strings.Contains(frame, "🌓") {
-		t.Fatalf("pending task must not use moon phases: %q", frame)
+	if strings.Contains(first, "○ pending") || strings.Contains(second, "○ pending") {
+		t.Fatalf("legacy pending marker remains: first=%q second=%q", first, second)
 	}
 }
 
@@ -368,7 +369,7 @@ func TestCompactTUIProgressUsesSpinnerAndNumbers(t *testing.T) {
 	if !strings.Contains(first, "42% 42/100") || !strings.Contains(second, "42% 42/100") {
 		t.Fatalf("unexpected progress sequence: first=%q second=%q", first, second)
 	}
-	if !strings.Contains(first, "⠙ building") || !strings.Contains(first, "jobs=18") || strings.Contains(first, "🌒") || strings.Contains(first, "✱") {
+	if !strings.Contains(first, "⠙ building") || !strings.Contains(first, "jobs=18") || strings.Contains(first, "🌒 building") || strings.Contains(first, "✱") {
 		t.Fatalf("progress line is missing execution details: first=%q", first)
 	}
 }
@@ -392,6 +393,40 @@ func TestCompactTUIHandlesCtrlA(t *testing.T) {
 	}
 	if !tui.details {
 		t.Fatal("Kitty Ctrl+A did not enable details")
+	}
+}
+
+func TestCompactTUIHandlesCtrlPCopyMode(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tui := newCompactTUI(nil, writer)
+	if pending := tui.handleInput([]byte{0x10}); len(pending) != 0 {
+		t.Fatalf("Ctrl+P was not consumed: %q", pending)
+	}
+	if !tui.copyMode {
+		t.Fatal("Ctrl+P did not enable copy mode")
+	}
+	if frame := tui.frame(true); !strings.Contains(frame, "Ctrl+P Resume") {
+		t.Fatalf("copy mode footer is missing: %q", frame)
+	}
+	if pending := tui.handleInput([]byte("\x1b[112;5u")); len(pending) != 0 {
+		t.Fatalf("Kitty Ctrl+P was not consumed: %q", pending)
+	}
+	if tui.copyMode {
+		t.Fatal("Kitty Ctrl+P did not disable copy mode")
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "\x1b[?1006l\x1b[?1000l\x1b[?25h") ||
+		!strings.Contains(string(data), "\x1b[?25l\x1b[?1000h\x1b[?1006h") {
+		t.Fatalf("copy mode did not release and restore the mouse: %q", data)
 	}
 }
 

@@ -28,6 +28,7 @@ const (
 )
 
 var compactTUISpinner = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+var compactTUIMoon = []rune("🌑🌒🌓🌔🌕🌖🌗🌘")
 
 type compactTaskStatus uint8
 
@@ -125,6 +126,7 @@ type compactTUI struct {
 	frameTop     int
 	frameTopSet  bool
 	cursorReport chan int
+	copyMode     bool
 	scrollPaused bool
 	scrollOffset int
 	summaries    []string
@@ -149,6 +151,7 @@ type compactMessages struct {
 	available  string
 	memory     string
 	footer     string
+	copyFooter string
 	outputLog  string
 	fallback   string
 	logWarning string
@@ -167,7 +170,8 @@ func compactMessagesForLocale(chinese bool) compactMessages {
 			running:    "运行中",
 			available:  "可用",
 			memory:     "内存",
-			footer:     "↑↓ 选择   Ctrl+A 详情   Ctrl+C 停止",
+			footer:     "↑↓ 选择   Ctrl+A 详情   Ctrl+P 复制   Ctrl+C 停止",
+			copyFooter: "复制模式   Ctrl+P 恢复   Ctrl+C 停止",
 			outputLog:  "uni: 完整输出日志: %s\n",
 			fallback:   "uni: compact TUI 已禁用，使用普通输出: %v\n",
 			logWarning: "uni: 输出日志警告: %v\n",
@@ -184,20 +188,12 @@ func compactMessagesForLocale(chinese bool) compactMessages {
 		running:    "running",
 		available:  "available",
 		memory:     "RAM",
-		footer:     "↑↓ Select   Ctrl+A Details   Ctrl+C Stop",
+		footer:     "↑↓ Select   Ctrl+A Details   Ctrl+P Copy   Ctrl+C Stop",
+		copyFooter: "Copy mode   Ctrl+P Resume   Ctrl+C Stop",
 		outputLog:  "uni: output log: %s\n",
 		fallback:   "uni: compact TUI disabled; using line output: %v\n",
 		logWarning: "uni: output log warning: %v\n",
 	}
-}
-
-func compactChineseLocale() bool {
-	for _, name := range []string{"LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"} {
-		if locale := strings.ToLower(strings.TrimSpace(os.Getenv(name))); locale != "" {
-			return strings.HasPrefix(locale, "zh")
-		}
-	}
-	return false
 }
 
 func newCompactTUI(input, terminal *os.File) *compactTUI {
@@ -540,7 +536,8 @@ func (tui *compactTUI) taskLine(task *compactTask) string {
 		}
 		return line
 	default:
-		return fmt.Sprintf("%s ○ %s", prefix, tui.messages.pending)
+		moon := string(compactTUIMoon[tui.spinner%len(compactTUIMoon)])
+		return fmt.Sprintf("%s %s %s", prefix, moon, tui.messages.pending)
 	}
 }
 
@@ -600,7 +597,11 @@ func (tui *compactTUI) frame(force bool) string {
 		}
 	}
 	output.WriteByte('\n')
-	output.WriteString(truncateCompactLine(tui.messages.footer, lineWidth))
+	footer := tui.messages.footer
+	if tui.copyMode {
+		footer = tui.messages.copyFooter
+	}
+	output.WriteString(truncateCompactLine(footer, lineWidth))
 	output.WriteByte('\n')
 	if tui.active != nil && tui.active.latest != "" && (!tui.details || tui.scrollOffset == 0) {
 		latest := truncateCompactDisplayLine(tui.active.latest, lineWidth-2)
@@ -673,6 +674,10 @@ func (tui *compactTUI) render(force bool) {
 
 func (tui *compactTUI) animate() {
 	tui.mu.Lock()
+	if tui.copyMode {
+		tui.mu.Unlock()
+		return
+	}
 	shouldRender := tui.dirty
 	if !tui.scrollPaused {
 		for _, task := range tui.tasks {
@@ -778,6 +783,9 @@ func (tui *compactTUI) handleInput(input []byte) []byte {
 			tui.dirty = true
 			tui.mu.Unlock()
 			input = input[1:]
+		case input[0] == 0x10:
+			tui.toggleCopyMode()
+			input = input[1:]
 		case input[0] == 'k' || input[0] == 'K':
 			tui.resumeLiveView()
 			tui.moveSelection(-1)
@@ -862,6 +870,8 @@ func (tui *compactTUI) handleInput(input []byte) []byte {
 								tui.scrollPaused = false
 								tui.dirty = true
 								tui.mu.Unlock()
+							case int('p'):
+								tui.toggleCopyMode()
 							case int('c'):
 								if tui.interrupt != nil {
 									tui.interrupt()
@@ -931,6 +941,28 @@ func (tui *compactTUI) handleInput(input []byte) []byte {
 		}
 	}
 	return input
+}
+
+func (tui *compactTUI) toggleCopyMode() {
+	tui.mu.Lock()
+	tui.copyMode = !tui.copyMode
+	copyMode := tui.copyMode
+	tui.dirty = true
+	tui.mu.Unlock()
+	if tui.terminal == nil {
+		return
+	}
+	if copyMode {
+		tui.render(true)
+		tui.renderMu.Lock()
+		_, _ = io.WriteString(tui.terminal, "\x1b[?1006l\x1b[?1000l\x1b[?25h")
+		tui.renderMu.Unlock()
+		return
+	}
+	tui.renderMu.Lock()
+	_, _ = io.WriteString(tui.terminal, "\x1b[?25l\x1b[?1000h\x1b[?1006h")
+	tui.renderMu.Unlock()
+	tui.render(true)
 }
 
 func (tui *compactTUI) handleMouseWheel(button int) {
