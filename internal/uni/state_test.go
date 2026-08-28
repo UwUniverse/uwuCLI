@@ -330,7 +330,11 @@ func TestR8TargetsRemainAcrossProductSegments(t *testing.T) {
 func TestStateValidationDetectsGraphChange(t *testing.T) {
 	directory := t.TempDir()
 	graph := filepath.Join(directory, "combined.ninja")
+	buildDate := filepath.Join(directory, "build_date.txt")
 	if err := os.WriteFile(graph, []byte("ninja"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(buildDate, []byte("1\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(graph)
@@ -343,7 +347,7 @@ func TestStateValidationDetectsGraphChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := State{Version: stateVersion, SourceRoot: directory, OutDir: directory,
-		TargetProduct: "uwu_nabu", BuildDateTime: "1", BuildDateTimeFile: graph,
+		TargetProduct: "uwu_nabu", BuildDateTime: "1", BuildDateTimeFile: buildDate,
 		GraphFiles: files, GraphFingerprint: fingerprint}
 	if err := state.Validate(directory, directory, "uwu_nabu"); err != nil {
 		t.Fatal(err)
@@ -353,6 +357,43 @@ func TestStateValidationDetectsGraphChange(t *testing.T) {
 	}
 	if err := state.Validate(directory, directory, "uwu_nabu"); err == nil {
 		t.Fatal("changed graph was accepted")
+	}
+}
+
+func TestStateValidationIgnoresBuildDateChange(t *testing.T) {
+	directory := t.TempDir()
+	graph := filepath.Join(directory, "combined.ninja")
+	buildDate := filepath.Join(directory, "build_date.txt")
+	if err := os.WriteFile(graph, []byte("ninja"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(buildDate, []byte("old\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	graphInfo, err := os.Stat(graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dateInfo, err := os.Stat(buildDate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := []GraphFile{
+		{Path: graph, Size: graphInfo.Size(), ModTimeNano: graphInfo.ModTime().UnixNano()},
+		{Path: buildDate, Size: dateInfo.Size(), ModTimeNano: dateInfo.ModTime().UnixNano()},
+	}
+	fingerprint, err := graphFingerprint(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := State{Version: stateVersion, SourceRoot: directory, OutDir: directory,
+		TargetProduct: "uwu_nabu", BuildDateTime: "old", BuildDateTimeFile: buildDate,
+		GraphFiles: files, GraphFingerprint: fingerprint}
+	if err := os.WriteFile(buildDate, []byte("new\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Validate(directory, directory, "uwu_nabu"); err != nil {
+		t.Fatalf("build date update invalidated graph: %v", err)
 	}
 }
 
