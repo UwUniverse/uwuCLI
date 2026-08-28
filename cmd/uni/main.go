@@ -26,7 +26,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := uni.Run(ctx, options); err != nil {
+	if err := uni.RunWithCompactTUI(ctx, options); err != nil {
 		fmt.Fprintf(os.Stderr, "uni: %v\n", err)
 		os.Exit(1)
 	}
