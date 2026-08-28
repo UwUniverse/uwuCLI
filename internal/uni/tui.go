@@ -127,10 +127,11 @@ type compactTUI struct {
 	summaries    []string
 	messages     compactMessages
 
-	stop      chan struct{}
-	done      chan struct{}
-	once      sync.Once
-	interrupt func()
+	stop         chan struct{}
+	done         chan struct{}
+	once         sync.Once
+	terminalOnce sync.Once
+	interrupt    func()
 }
 
 type compactMessages struct {
@@ -684,6 +685,24 @@ func (tui *compactTUI) start() {
 	}()
 }
 
+func (tui *compactTUI) stopInput() {
+	if tui == nil || tui.stop == nil {
+		return
+	}
+	tui.once.Do(func() { close(tui.stop) })
+}
+
+func (tui *compactTUI) disableTerminal() {
+	if tui == nil || tui.terminal == nil {
+		return
+	}
+	tui.renderMu.Lock()
+	defer tui.renderMu.Unlock()
+	tui.terminalOnce.Do(func() {
+		_, _ = io.WriteString(tui.terminal, "\x1b[?1006l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[<u\x1b[?25h\x1b[0m")
+	})
+}
+
 func (tui *compactTUI) inputLoop() {
 	buffer := make([]byte, 16)
 	var pending []byte
@@ -989,9 +1008,9 @@ func (tui *compactTUI) finish(err error) {
 }
 
 func (tui *compactTUI) close() {
-	tui.once.Do(func() { close(tui.stop) })
+	tui.stopInput()
 	<-tui.done
-	_, _ = io.WriteString(tui.terminal, "\x1b[?1006l\x1b[?1000l\x1b[<u\x1b[?25h")
+	tui.disableTerminal()
 }
 
 func (tui *compactTUI) summaryLines() []string {
@@ -1120,8 +1139,20 @@ func RunWithCompactTUI(ctx context.Context, options Options) (runErr error) {
 	go func() { captured <- captureCompactOutput(reader, logFile, tui) }()
 	os.Stdout, os.Stderr = writer, writer
 	tui.start()
+	watchDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			// Restore terminal input immediately; build-process cleanup may take seconds.
+			tui.stopInput()
+			tui.disableTerminal()
+			terminalState.restore()
+		case <-watchDone:
+		}
+	}()
 
 	defer func() {
+		close(watchDone)
 		os.Stdout, os.Stderr = originalStdout, originalStderr
 		_ = writer.Close()
 		captureErr := waitCompactCapture(captured, reader, compactTUICaptureTimeout)

@@ -6,6 +6,7 @@ package uni
 import (
 	"fmt"
 	"os"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -13,6 +14,7 @@ import (
 type compactTerminalState struct {
 	fd       int
 	original syscall.Termios
+	once     sync.Once
 }
 
 type terminalSize struct {
@@ -54,7 +56,9 @@ func (state *compactTerminalState) restore() {
 	if state == nil {
 		return
 	}
-	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, uintptr(state.fd), syscall.TCSETS, uintptr(unsafe.Pointer(&state.original)))
+	state.once.Do(func() {
+		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, uintptr(state.fd), syscall.TCSETS, uintptr(unsafe.Pointer(&state.original)))
+	})
 }
 
 func compactTerminalSize(file *os.File) terminalSize {
