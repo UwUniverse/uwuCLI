@@ -718,7 +718,13 @@ func (tui *compactTUI) inputLoop() {
 			pending = tui.handleInput(pending)
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
+			// With VMIN=0/VTIME>0, an idle terminal read is reported by
+			// os.File as io.EOF even though the terminal is still open.
+			if errors.Is(err, io.EOF) && count == 0 {
+				time.Sleep(time.Millisecond)
+				continue
+			}
+			if errors.Is(err, os.ErrClosed) || errors.Is(err, io.EOF) {
 				return
 			}
 			time.Sleep(5 * time.Millisecond)

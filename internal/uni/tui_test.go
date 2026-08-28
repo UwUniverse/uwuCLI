@@ -199,6 +199,9 @@ func TestCompactTUIInputLoopConsumesTerminalBytes(t *testing.T) {
 		tui.inputLoop()
 		close(inputDone)
 	}()
+	// VMIN=0/VTIME>0 produces an idle EOF in os.File.Read. The loop must
+	// remain alive and consume input that arrives after that timeout.
+	time.Sleep(150 * time.Millisecond)
 	if _, err := writer.Write([]byte{0x01}); err != nil {
 		t.Fatal(err)
 	}
