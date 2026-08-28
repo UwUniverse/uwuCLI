@@ -121,6 +121,7 @@ type compactTUI struct {
 	r8           int
 	memory       int64
 	spinner      int
+	spinnerAt    time.Time
 	pending      int
 	pendingAt    time.Time
 	dirty        bool
@@ -191,6 +192,7 @@ func newCompactTUI(input, terminal *os.File) *compactTUI {
 		cursorReport: make(chan int, 1),
 		dirty:        true,
 		pendingAt:    time.Now(),
+		spinnerAt:    time.Now(),
 		messages:     messages,
 	}
 	for _, name := range names {
@@ -532,7 +534,10 @@ func (tui *compactTUI) frame(force bool) string {
 		return ""
 	}
 	tui.dirty = false
-	tui.spinner = (tui.spinner + 1) % len(compactTUISpinner)
+	if time.Since(tui.spinnerAt) >= 120*time.Millisecond {
+		tui.spinner = (tui.spinner + 1) % len(compactTUISpinner)
+		tui.spinnerAt = time.Now()
+	}
 	if time.Since(tui.pendingAt) >= 180*time.Millisecond {
 		tui.pending = (tui.pending + 1) % len(compactTUIPending)
 		tui.pendingAt = time.Now()

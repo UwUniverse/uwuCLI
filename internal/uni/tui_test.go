@@ -328,7 +328,9 @@ func TestCompactTUIFrameReservesTerminalColumn(t *testing.T) {
 func TestCompactTUIRunningTaskUsesSpinner(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
 	tui.phaseStarted("startup", 4)
+	tui.spinnerAt = time.Now().Add(-time.Second)
 	first := tui.frame(true)
+	tui.spinnerAt = time.Now().Add(-time.Second)
 	second := tui.frame(true)
 	if first == second {
 		t.Fatalf("spinner frame did not advance: %q", first)
@@ -359,7 +361,9 @@ func TestCompactTUIProgressUsesSpinnerAndNumbers(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
 	tui.phaseStarted("ninja", 18)
 	tui.consume("[ 42% 42/100] target")
+	tui.spinnerAt = time.Now().Add(-time.Second)
 	first := tui.frame(true)
+	tui.spinnerAt = time.Now().Add(-time.Second)
 	second := tui.frame(true)
 	if !strings.Contains(first, "42% 42/100") || !strings.Contains(second, "42% 42/100") {
 		t.Fatalf("unexpected progress sequence: first=%q second=%q", first, second)
