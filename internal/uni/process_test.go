@@ -5,6 +5,7 @@ package uni
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -51,6 +52,17 @@ func TestEnvironmentTrue(t *testing.T) {
 	}
 }
 
+func TestSisoPriorityTargetsAreEncodedForSinglePhase(t *testing.T) {
+	runner := &commandRunner{sisoPriorityTargets: []string{"out/kernel image", "out/r8.jar"}}
+	data, err := json.Marshal(runner.sisoPriorityTargets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), `["out/kernel image","out/r8.jar"]`; got != want {
+		t.Fatalf("priority targets = %s, want %s", got, want)
+	}
+}
+
 func TestPhasedNinjaExecutor(t *testing.T) {
 	tests := map[string]string{
 		"":        "ninja",
@@ -73,6 +85,30 @@ func TestExecutorLabel(t *testing.T) {
 	}
 	if actual := executorLabel("ninja"); actual != "ninja" {
 		t.Fatalf("ninja executor label = %q", actual)
+	}
+}
+
+func TestSingleNinjaPhaseKeepsRequestedExecutor(t *testing.T) {
+	if forcePhasedNinja("--uni-ninja-mode", "only", "", false) {
+		t.Fatal("single Ninja phase was forced to the phased executor")
+	}
+	if !forcePhasedNinja("--uni-ninja-mode", "first", "", false) {
+		t.Fatal("segmented Ninja phase did not select the phased executor")
+	}
+	if !forcePhasedNinja("--uni-ninja-mode", "only", "/tmp/ninja", false) {
+		t.Fatal("assume-existing mode did not select the patched Ninja executor")
+	}
+	if !forcePhasedNinja("--uni-ninja-mode", "only", "", true) {
+		t.Fatal("full build did not select the local Ninja executor")
+	}
+}
+
+func TestNestedKernelJobsKeepsNinjaInControl(t *testing.T) {
+	if got := nestedKernelJobs(18); got != 18 {
+		t.Fatalf("nested kernel jobs = %d, want 18", got)
+	}
+	if got := nestedKernelJobs(1); got != 1 {
+		t.Fatalf("single-job nested kernel jobs = %d, want 1", got)
 	}
 }
 
@@ -186,6 +222,29 @@ func TestTerminateBuildProcessTreeCleansTaggedOrphan(t *testing.T) {
 	case <-waited:
 	case <-time.After(5 * time.Second):
 		t.Fatal("tagged orphan survived cleanup")
+	}
+	cleanupRequired = false
+}
+
+func TestTerminateResidualBuildProcesses(t *testing.T) {
+	outDir := t.TempDir()
+	statePath := filepath.Join(outDir, "uni", "product", "state.json")
+	command := exec.Command("sleep", "300")
+	command.Env = append(os.Environ(), "UNI_STATE_FILE="+statePath)
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	cleanupRequired := true
+	t.Cleanup(func() {
+		if cleanupRequired {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	})
+	result := terminateResidualBuildProcesses(outDir)
+	_ = command.Wait()
+	if result.Found != 1 || result.Remaining != 0 {
+		t.Fatalf("unexpected cleanup result: %+v", result)
 	}
 	cleanupRequired = false
 }

@@ -150,6 +150,32 @@ func runningUniProcess(outDir string) int {
 	return processes[0].PID
 }
 
+type residualProcessCleanup struct {
+	Found     int
+	TermSent  int
+	KillSent  int
+	Remaining int
+}
+
+func terminateResidualBuildProcesses(outDir string) residualProcessCleanup {
+	processes := runningUniProcesses(outDir)
+	result := residualProcessCleanup{Found: len(processes)}
+	if len(processes) == 0 {
+		return result
+	}
+	result.TermSent = len(processes)
+	signalProcessIdentities(processes, syscall.SIGTERM)
+	waitForProcessIdentitiesExit(processes, 500*time.Millisecond)
+	processes = runningUniProcesses(outDir)
+	if len(processes) > 0 {
+		result.KillSent = len(processes)
+		signalProcessIdentities(processes, syscall.SIGKILL)
+		waitForProcessIdentitiesExit(processes, 2*time.Second)
+	}
+	result.Remaining = len(runningUniProcesses(outDir))
+	return result
+}
+
 func sameProcess(identity processIdentity) bool {
 	current, err := readProcessIdentity(identity.PID)
 	return err == nil && current.StartTime == identity.StartTime
