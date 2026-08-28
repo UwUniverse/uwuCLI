@@ -640,7 +640,9 @@ func (tui *compactTUI) render(force bool) {
 	}
 	output.WriteString("\x1b[J")
 	_, _ = io.WriteString(tui.terminal, output.String())
+	tui.mu.Lock()
 	tui.rendered = strings.Count(frame, "\n")
+	tui.mu.Unlock()
 }
 
 func (tui *compactTUI) animate() {
@@ -742,13 +744,24 @@ func (tui *compactTUI) handleInput(input []byte) []byte {
 					return input
 				}
 				fields := strings.Split(string(input[3:final]), ";")
-				if len(fields) > 0 {
-					button, err := strconv.Atoi(fields[0])
-					if err == nil {
-						tui.handleMouseWheel(button)
+				if len(fields) >= 3 {
+					button, buttonErr := strconv.Atoi(fields[0])
+					x, xErr := strconv.Atoi(fields[1])
+					y, yErr := strconv.Atoi(fields[2])
+					if buttonErr == nil && xErr == nil && yErr == nil {
+						tui.handleMouseEvent(button, x, y, input[final] == 'm')
 					}
 				}
 				input = input[final+1:]
+				continue
+			}
+			if input[1] == '[' && len(input) > 2 && input[2] == 'M' {
+				if len(input) < 6 {
+					return input
+				}
+				button, x, y := int(input[3])-32, int(input[4])-32, int(input[5])-32
+				tui.handleMouseEvent(button, x, y, false)
+				input = input[6:]
 				continue
 			}
 			if input[1] == '[' && len(input) > 2 && input[2] >= '0' && input[2] <= '9' {
@@ -882,6 +895,36 @@ func (tui *compactTUI) handleMouseWheel(button int) {
 	tui.dirty = true
 }
 
+func (tui *compactTUI) handleMouseEvent(button, _, y int, release bool) {
+	if button&64 != 0 {
+		tui.handleMouseWheel(button)
+		return
+	}
+	if release || (button != 0 && button != 2) {
+		return
+	}
+	size := compactTerminalSize(tui.terminal)
+	tui.mu.Lock()
+	defer tui.mu.Unlock()
+	if tui.rendered <= 0 {
+		return
+	}
+	// The rendered frame is anchored above the cursor. Coordinates are
+	// one-based, while the task rows start after the header.
+	top := int(size.rows) - tui.rendered
+	index := y - (top + 2)
+	if index < 0 || index >= len(tui.tasks) {
+		return
+	}
+	tui.selected = index
+	if button == 2 {
+		tui.details = !tui.details
+		tui.scrollOffset = 0
+		tui.scrollPaused = false
+	}
+	tui.dirty = true
+}
+
 func (tui *compactTUI) scrollHistory(direction int) {
 	tui.mu.Lock()
 	defer tui.mu.Unlock()
@@ -959,7 +1002,7 @@ func (tui *compactTUI) summaryLines() []string {
 
 func shouldUseCompactTUI(options Options, stdinTTY, stdoutTTY bool, term string) bool {
 	return stdinTTY && stdoutTTY && term != "" && !strings.EqualFold(term, "dumb") &&
-		!options.ShowCommands && !options.Plan && !options.CleanLogs
+		!options.NoTUI && !options.ShowCommands && !options.Plan && !options.CleanLogs
 }
 
 func outputLogPath(outDir string, now time.Time) string {

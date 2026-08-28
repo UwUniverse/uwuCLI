@@ -31,6 +31,9 @@ func TestShouldUseCompactTUI(t *testing.T) {
 		shouldUseCompactTUI(Options{}, true, true, "dumb") {
 		t.Fatal("non-interactive terminal should use line output")
 	}
+	if shouldUseCompactTUI(Options{NoTUI: true}, true, true, "xterm") {
+		t.Fatal("--no-tui did not disable compact TUI")
+	}
 }
 
 func TestParseCompactProgress(t *testing.T) {
@@ -236,6 +239,30 @@ func TestCompactTUISelectionUsesArrowWithoutReverseVideo(t *testing.T) {
 	second := tui.frame(true)
 	if !strings.Contains(second, "→ "+tui.tasks[1].label) || strings.Contains(second, "\x1b[7m") {
 		t.Fatalf("unexpected moved selection rendering: %q", second)
+	}
+}
+
+func TestCompactTUIMouseClickSelectsTask(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	tui.rendered = 11
+	if pending := tui.handleInput([]byte("\x1b[<0;10;16M")); len(pending) != 0 {
+		t.Fatalf("mouse click was not consumed: %q", pending)
+	}
+	if tui.selected != 1 {
+		t.Fatalf("mouse click selected=%d, want 1", tui.selected)
+	}
+	if pending := tui.handleInput([]byte("\x1b[<2;10;17M")); len(pending) != 0 {
+		t.Fatalf("right click was not consumed: %q", pending)
+	}
+	if !tui.details {
+		t.Fatal("right click did not toggle details")
+	}
+	tui.details = false
+	if pending := tui.handleInput([]byte{'\x1b', '[', 'M', 32, 42, 48}); len(pending) != 0 {
+		t.Fatalf("legacy mouse click was not consumed: %q", pending)
+	}
+	if tui.selected != 1 {
+		t.Fatalf("legacy mouse click selected=%d, want 1", tui.selected)
 	}
 }
 

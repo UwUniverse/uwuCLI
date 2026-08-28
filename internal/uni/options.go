@@ -41,6 +41,7 @@ type Options struct {
 	AssumeExisting bool
 	ForceReuse     bool
 	CleanLogs      bool
+	NoTUI          bool
 	Targets        []string
 }
 
@@ -72,6 +73,8 @@ Options:
   --debug              Write a detailed report to OUT_DIR (default)
   --no-debug           Disable the detailed report for this run
   --clean-logs         Remove build logs without touching build outputs
+  --tui                Use the compact terminal UI (default in a TTY)
+  --no-tui             Use normal line output instead of the compact TUI
   --dev                Rebuild the R8 index for this run
   --dev-auto           Enable automatic R8 index refresh
   --no-dev-auto        Disable automatic R8 index refresh
@@ -100,6 +103,8 @@ const usageChinese = `用法: uni [选项] [目标...]
   --debug              在 OUT_DIR 写入详细调试报告（默认开启）
   --no-debug           本次关闭详细调试报告
   --clean-logs         清理构建日志，不删除编译产物
+  --tui                使用 compact TUI（TTY 中默认开启）
+  --no-tui             禁用 compact TUI，使用普通输出
   --dev                本次重新生成 R8 索引
   --dev-auto           开启 R8 索引自动刷新
   --no-dev-auto        关闭 R8 索引自动刷新
@@ -168,6 +173,8 @@ func normalizeSingleDashOptions(args []string) []string {
 		"-no-dev-auto":     "--no-dev-auto",
 		"-load-average":    "--load-average",
 		"-clean-logs":      "--clean-logs",
+		"-tui":             "--tui",
+		"-no-tui":          "--no-tui",
 	}
 	normalized := append([]string(nil), args...)
 	for index, arg := range normalized {
@@ -239,6 +246,12 @@ func ParseOptions(args []string) (Options, error) {
 			continue
 		case "--clean-logs":
 			options.CleanLogs = true
+			continue
+		case "--tui":
+			options.NoTUI = false
+			continue
+		case "--no-tui":
+			options.NoTUI = true
 			continue
 		case "--dev":
 			options.Dev = true
