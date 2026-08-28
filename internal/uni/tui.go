@@ -28,7 +28,7 @@ const (
 )
 
 var compactTUISpinner = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-var compactTUIPending = []rune("◐◓◑◒")
+var compactTUIPending = []rune("◯◉◎●")
 
 type compactTaskStatus uint8
 
