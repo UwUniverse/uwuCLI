@@ -341,15 +341,17 @@ func TestCompactTUIRunningTaskUsesSpinner(t *testing.T) {
 	}
 }
 
-func TestCompactTUIPendingTaskUsesMoonPhases(t *testing.T) {
+func TestCompactTUIPendingTaskUsesStableSpinner(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
 	first := tui.frame(true)
 	second := tui.frame(true)
-	if !strings.Contains(first, "🌒 pending") || !strings.Contains(second, "🌓 pending") {
-		t.Fatalf("unexpected pending phases: first=%q second=%q", first, second)
+	if !strings.Contains(first, "◐ pending") || !strings.Contains(second, "◐ pending") {
+		t.Fatalf("unexpected pending marker: first=%q second=%q", first, second)
 	}
-	if strings.Contains(first, "○ pending") || strings.Contains(second, "○ pending") {
-		t.Fatalf("legacy pending marker remains: first=%q second=%q", first, second)
+	tui.pendingAt = time.Now().Add(-time.Second)
+	third := tui.frame(true)
+	if !strings.Contains(third, "◓ pending") {
+		t.Fatalf("pending marker did not advance slowly: %q", third)
 	}
 }
 
@@ -362,7 +364,7 @@ func TestCompactTUIProgressUsesSpinnerAndNumbers(t *testing.T) {
 	if !strings.Contains(first, "42% 42/100") || !strings.Contains(second, "42% 42/100") {
 		t.Fatalf("unexpected progress sequence: first=%q second=%q", first, second)
 	}
-	if !strings.Contains(first, "⠙ building") || !strings.Contains(first, "jobs=18") || strings.Contains(first, "🌒 building") || strings.Contains(first, "✱") {
+	if !strings.Contains(first, "⠙ building") || !strings.Contains(first, "jobs=18") || strings.Contains(first, "◓ building") || strings.Contains(first, "✱") {
 		t.Fatalf("progress line is missing execution details: first=%q", first)
 	}
 }

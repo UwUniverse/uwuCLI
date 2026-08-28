@@ -28,7 +28,7 @@ const (
 )
 
 var compactTUISpinner = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-var compactTUIMoon = []rune("🌑🌒🌓🌔🌕🌖🌗🌘")
+var compactTUIPending = []rune("◐◓◑◒")
 
 type compactTaskStatus uint8
 
@@ -121,6 +121,8 @@ type compactTUI struct {
 	r8           int
 	memory       int64
 	spinner      int
+	pending      int
+	pendingAt    time.Time
 	dirty        bool
 	rendered     int
 	frameTop     int
@@ -188,6 +190,7 @@ func newCompactTUI(input, terminal *os.File) *compactTUI {
 		done:         make(chan struct{}),
 		cursorReport: make(chan int, 1),
 		dirty:        true,
+		pendingAt:    time.Now(),
 		messages:     messages,
 	}
 	for _, name := range names {
@@ -517,8 +520,8 @@ func (tui *compactTUI) taskLine(task *compactTask) string {
 		}
 		return line
 	default:
-		moon := string(compactTUIMoon[tui.spinner%len(compactTUIMoon)])
-		return fmt.Sprintf("%s %s %s", prefix, moon, tui.messages.pending)
+		pending := string(compactTUIPending[tui.pending%len(compactTUIPending)])
+		return fmt.Sprintf("%s %s %s", prefix, pending, tui.messages.pending)
 	}
 }
 
@@ -530,6 +533,10 @@ func (tui *compactTUI) frame(force bool) string {
 	}
 	tui.dirty = false
 	tui.spinner = (tui.spinner + 1) % len(compactTUISpinner)
+	if time.Since(tui.pendingAt) >= 400*time.Millisecond {
+		tui.pending = (tui.pending + 1) % len(compactTUIPending)
+		tui.pendingAt = time.Now()
+	}
 	size := compactTerminalSize(tui.terminal)
 	width := int(size.cols)
 	if width < 40 {
