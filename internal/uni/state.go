@@ -137,12 +137,17 @@ func (state State) Validate(sourceRoot, outDir, product string) error {
 	if state.TargetProduct != product {
 		return fmt.Errorf("target product changed")
 	}
-	fingerprint, err := graphFingerprint(state.GraphFiles)
-	if err != nil {
-		return fmt.Errorf("build graph is incomplete: %w", err)
-	}
-	if fingerprint != state.GraphFingerprint {
-		return fmt.Errorf("build graph changed")
+	for _, expected := range state.GraphFiles {
+		if filepath.Clean(expected.Path) == filepath.Clean(state.BuildDateTimeFile) {
+			continue
+		}
+		info, err := os.Stat(expected.Path)
+		if err != nil {
+			return fmt.Errorf("build graph is incomplete: %w", err)
+		}
+		if info.Size() != expected.Size || info.ModTime().UnixNano() != expected.ModTimeNano {
+			return fmt.Errorf("build graph changed")
+		}
 	}
 	return nil
 }
@@ -309,6 +314,10 @@ func ForceReuseState(path, sourceRoot, outDir, product, release, variant string,
 	state.NinjaArgs = currentNinjaTargets(options)
 	state.OriginalArgs = append([]string(nil), options.BuildArgs...)
 	state.Dist = options.Dist
+	state.SourceFingerprint, _, err = sourceGraphFingerprint(sourceRoot, outDir)
+	if err != nil {
+		return State{}, false, err
+	}
 	for index := range state.GraphFiles {
 		info, statErr := os.Stat(state.GraphFiles[index].Path)
 		if statErr != nil {

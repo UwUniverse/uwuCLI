@@ -330,7 +330,11 @@ func TestR8TargetsRemainAcrossProductSegments(t *testing.T) {
 func TestStateValidationDetectsGraphChange(t *testing.T) {
 	directory := t.TempDir()
 	graph := filepath.Join(directory, "combined.ninja")
+	buildDate := filepath.Join(directory, "build_date.txt")
 	if err := os.WriteFile(graph, []byte("ninja"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(buildDate, []byte("1\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(graph)
@@ -343,7 +347,7 @@ func TestStateValidationDetectsGraphChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := State{Version: stateVersion, SourceRoot: directory, OutDir: directory,
-		TargetProduct: "uwu_nabu", BuildDateTime: "1", BuildDateTimeFile: graph,
+		TargetProduct: "uwu_nabu", BuildDateTime: "1", BuildDateTimeFile: buildDate,
 		GraphFiles: files, GraphFingerprint: fingerprint}
 	if err := state.Validate(directory, directory, "uwu_nabu"); err != nil {
 		t.Fatal(err)
@@ -353,6 +357,43 @@ func TestStateValidationDetectsGraphChange(t *testing.T) {
 	}
 	if err := state.Validate(directory, directory, "uwu_nabu"); err == nil {
 		t.Fatal("changed graph was accepted")
+	}
+}
+
+func TestStateValidationIgnoresBuildDateChange(t *testing.T) {
+	directory := t.TempDir()
+	graph := filepath.Join(directory, "combined.ninja")
+	buildDate := filepath.Join(directory, "build_date.txt")
+	if err := os.WriteFile(graph, []byte("ninja"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(buildDate, []byte("old\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	graphInfo, err := os.Stat(graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dateInfo, err := os.Stat(buildDate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := []GraphFile{
+		{Path: graph, Size: graphInfo.Size(), ModTimeNano: graphInfo.ModTime().UnixNano()},
+		{Path: buildDate, Size: dateInfo.Size(), ModTimeNano: dateInfo.ModTime().UnixNano()},
+	}
+	fingerprint, err := graphFingerprint(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := State{Version: stateVersion, SourceRoot: directory, OutDir: directory,
+		TargetProduct: "uwu_nabu", BuildDateTime: "old", BuildDateTimeFile: buildDate,
+		GraphFiles: files, GraphFingerprint: fingerprint}
+	if err := os.WriteFile(buildDate, []byte("new\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Validate(directory, directory, "uwu_nabu"); err != nil {
+		t.Fatalf("build date update invalidated graph: %v", err)
 	}
 }
 
@@ -452,6 +493,59 @@ func TestReuseStateRejectsGraphSourceChange(t *testing.T) {
 	}
 	if reused {
 		t.Fatal("changed source graph was reused")
+	}
+}
+
+func TestForceReuseStatePersistsCurrentSourceFingerprint(t *testing.T) {
+	directory := t.TempDir()
+	outDir := filepath.Join(directory, "out")
+	if err := os.MkdirAll(outDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "Android.bp"), []byte("filegroup {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	graph := filepath.Join(outDir, "combined.ninja")
+	buildDate := filepath.Join(outDir, "build_date.txt")
+	if err := os.WriteFile(graph, []byte("build droid: phony\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(buildDate, []byte("123\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	graphInfo, err := os.Stat(graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dateInfo, err := os.Stat(buildDate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := []GraphFile{
+		{Path: graph, Size: graphInfo.Size(), ModTimeNano: graphInfo.ModTime().UnixNano()},
+		{Path: buildDate, Size: dateInfo.Size(), ModTimeNano: dateInfo.ModTime().UnixNano()},
+	}
+	fingerprint, err := graphFingerprint(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(outDir, "state.json")
+	state := State{Version: stateVersion, SourceRoot: directory, OutDir: outDir,
+		TargetProduct: "uwu_test", TargetRelease: "cp2a", BuildVariant: "userdebug",
+		BuildDateTime: "123", BuildDateTimeFile: buildDate, GraphFiles: files,
+		GraphFingerprint: fingerprint, SourceFingerprint: "stale"}
+	if err := SaveState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	reusedState, reused, err := ForceReuseState(statePath, directory, outDir, "uwu_test", "cp2a", "userdebug", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reused || reusedState.SourceFingerprint == "" || reusedState.SourceFingerprint == "stale" {
+		t.Fatalf("current source fingerprint was not persisted: reused=%t fingerprint=%q", reused, reusedState.SourceFingerprint)
+	}
+	if _, reused, err := ReuseState(statePath, directory, outDir, "uwu_test", "cp2a", "userdebug", Options{}); err != nil || !reused {
+		t.Fatalf("forced state was not reusable: reused=%t err=%v", reused, err)
 	}
 }
 
