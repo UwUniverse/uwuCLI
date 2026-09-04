@@ -4,6 +4,9 @@
 package uni
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,7 +78,7 @@ func TestCompactDisplayLinePreservesColorsAndProgress(t *testing.T) {
 	if !strings.Contains(frame, "\x1b[32m[100% 1/1] bootstrap blueprint\x1b[0m") {
 		t.Fatalf("frame lost colored progress line: %q", frame)
 	}
-	if !strings.HasSuffix(frame, "\x1b[0m\n") {
+	if !strings.HasSuffix(frame, "\x1b[0m") {
 		t.Fatalf("latest output is not the final TUI line: %q", frame)
 	}
 }
@@ -103,6 +106,53 @@ func TestCompactTUITracksPhaseProgressAndTelemetry(t *testing.T) {
 	tui.phaseFinished("startup", nil)
 	if task.status != compactTaskDone {
 		t.Fatalf("task status=%v, want done", task.status)
+	}
+}
+
+func TestCompactTUIFinishPreservesCompletedPhase(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	tui.phaseStarted("kernel", 18)
+	tui.phaseFinished("kernel", nil)
+	tui.finish(errors.New("scheduler failed after kernel"))
+	if status := tui.byName["Kernel"].status; status != compactTaskDone {
+		t.Fatalf("completed kernel status = %v, want done", status)
+	}
+}
+
+func TestCompactTUIClearRenderedFrameRemovesDashboard(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tui := newCompactTUI(nil, writer)
+	tui.render(true)
+	rendered := tui.rendered
+	tui.clearRenderedFrame()
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "\r\x1b[J"
+	if rendered > 1 {
+		want = fmt.Sprintf("\r\x1b[%dA\x1b[J", rendered-1)
+	}
+	if !strings.HasSuffix(string(data), want) {
+		t.Fatalf("dashboard was not cleared: rendered=%d output=%q", rendered, data)
+	}
+	if tui.rendered != 0 {
+		t.Fatalf("rendered lines=%d, want 0", tui.rendered)
+	}
+}
+
+func TestCompactTUISuccessSummaryKeepsColor(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	tui.consume("\x1b[0;32m#### build completed successfully (01:17:07 (hh:mm:ss)) ####\x1b[0m")
+	lines := tui.summaryLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "\x1b[0;32m") || !strings.Contains(lines[0], "\x1b[0m") {
+		t.Fatalf("success summary lost color: %q", lines)
 	}
 }
 
@@ -245,8 +295,28 @@ func TestCompactTUIFrameDoesNotClearExistingTerminalOutput(t *testing.T) {
 	if strings.Contains(frame, "\x1b[2J") || strings.Contains(frame, "\x1b[H") {
 		t.Fatalf("frame clears output printed before uni: %q", frame)
 	}
-	if !strings.HasSuffix(frame, "\n") {
-		t.Fatalf("inline frame must leave the cursor below the TUI: %q", frame)
+	if strings.HasSuffix(frame, "\n") {
+		t.Fatalf("inline frame must keep the cursor on its final row: %q", frame)
+	}
+}
+
+func TestCompactTUIRenderDoesNotScrollOnRefresh(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tui := newCompactTUI(nil, writer)
+	tui.render(true)
+	tui.render(true)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "\x1b[8A\x1b[1G") {
+		t.Fatalf("refresh did not return to the previous frame: %q", data)
 	}
 }
 
@@ -266,11 +336,13 @@ func TestCompactTUIRunningTaskUsesSpinner(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
 	tui.phaseStarted("startup", 4)
 	first := tui.frame(true)
+	tui.spinnerAt = time.Now().Add(-compactTUISpinnerInterval)
+	tui.animate()
 	second := tui.frame(true)
 	if first == second {
 		t.Fatalf("spinner frame did not advance: %q", first)
 	}
-	if !strings.Contains(first, "⠙") || !strings.Contains(second, "⠹") {
+	if !strings.Contains(first, "|") || !strings.Contains(second, "/") {
 		t.Fatalf("unexpected spinner sequence: first=%q second=%q", first, second)
 	}
 	if strings.Contains(first, "✱") || strings.Contains(first, "●") {
@@ -278,10 +350,28 @@ func TestCompactTUIRunningTaskUsesSpinner(t *testing.T) {
 	}
 }
 
-func TestCompactTUIPendingTaskUsesCircle(t *testing.T) {
+func TestCompactTUIAnimationIsRateLimited(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	tui.phaseStarted("startup", 4)
+	tui.frame(true)
+
+	spinner := tui.spinner
+	tui.animate()
+	if tui.spinner != spinner || tui.dirty {
+		t.Fatalf("animation advanced before interval: spinner=%d dirty=%t", tui.spinner, tui.dirty)
+	}
+
+	tui.spinnerAt = time.Now().Add(-compactTUISpinnerInterval)
+	tui.animate()
+	if tui.spinner == spinner {
+		t.Fatal("animation did not advance after interval")
+	}
+}
+
+func TestCompactTUIPendingTaskUsesHollowSquare(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
 	frame := tui.frame(true)
-	if !strings.Contains(frame, "○ pending") {
+	if !strings.Contains(frame, "□ pending") {
 		t.Fatalf("unexpected pending marker: %q", frame)
 	}
 	if strings.Contains(frame, "🌒") || strings.Contains(frame, "🌓") {
@@ -294,11 +384,13 @@ func TestCompactTUIProgressUsesSpinnerAndNumbers(t *testing.T) {
 	tui.phaseStarted("ninja", 18)
 	tui.consume("[ 42% 42/100] target")
 	first := tui.frame(true)
+	tui.spinnerAt = time.Now().Add(-compactTUISpinnerInterval)
+	tui.animate()
 	second := tui.frame(true)
 	if !strings.Contains(first, "42% 42/100") || !strings.Contains(second, "42% 42/100") {
 		t.Fatalf("unexpected progress sequence: first=%q second=%q", first, second)
 	}
-	if !strings.Contains(first, "⠙ building") || !strings.Contains(first, "jobs=18") || strings.Contains(first, "🌒") || strings.Contains(first, "✱") {
+	if !strings.Contains(first, "| building") || !strings.Contains(first, "jobs=18") || strings.Contains(first, "🌒") || strings.Contains(first, "✱") {
 		t.Fatalf("progress line is missing execution details: first=%q", first)
 	}
 }
@@ -322,6 +414,40 @@ func TestCompactTUIHandlesCtrlA(t *testing.T) {
 	}
 	if !tui.details {
 		t.Fatal("Kitty Ctrl+A did not enable details")
+	}
+}
+
+func TestCompactTUIHandlesCtrlPCopyMode(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tui := newCompactTUI(nil, writer)
+	if pending := tui.handleInput([]byte{0x10}); len(pending) != 0 {
+		t.Fatalf("Ctrl+P was not consumed: %q", pending)
+	}
+	if !tui.copyMode {
+		t.Fatal("Ctrl+P did not enable copy mode")
+	}
+	if frame := tui.frame(true); !strings.Contains(frame, "Ctrl+P Resume") {
+		t.Fatalf("copy mode footer is missing: %q", frame)
+	}
+	if pending := tui.handleInput([]byte("\x1b[112;5u")); len(pending) != 0 {
+		t.Fatalf("Kitty Ctrl+P was not consumed: %q", pending)
+	}
+	if tui.copyMode {
+		t.Fatal("Kitty Ctrl+P did not disable copy mode")
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "\x1b[?1006l\x1b[?1000l\x1b[?25h") ||
+		!strings.Contains(string(data), "\x1b[?25l\x1b[?1000h\x1b[?1006h") {
+		t.Fatalf("copy mode did not release and restore the mouse: %q", data)
 	}
 }
 

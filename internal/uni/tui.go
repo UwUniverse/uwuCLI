@@ -20,6 +20,7 @@ import (
 
 const (
 	compactTUIRefreshInterval = 33 * time.Millisecond
+	compactTUISpinnerInterval = 200 * time.Millisecond
 	compactTUILogLines        = 160
 	compactTUIWheelStep       = 3
 	compactTUILineBytes       = 4096
@@ -27,7 +28,7 @@ const (
 	compactTUICaptureTimeout  = 2 * time.Second
 )
 
-var compactTUISpinner = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+var compactTUISpinner = []rune{'|', '/', '-', '\\'}
 
 type compactTaskStatus uint8
 
@@ -120,6 +121,8 @@ type compactTUI struct {
 	r8           int
 	memory       int64
 	spinner      int
+	spinnerAt    time.Time
+	copyMode     bool
 	dirty        bool
 	rendered     int
 	scrollPaused bool
@@ -145,6 +148,7 @@ type compactMessages struct {
 	available  string
 	memory     string
 	footer     string
+	copyFooter string
 	outputLog  string
 	fallback   string
 	logWarning string
@@ -163,7 +167,8 @@ func compactMessagesForLocale(chinese bool) compactMessages {
 			running:    "运行中",
 			available:  "可用",
 			memory:     "内存",
-			footer:     "↑↓ 选择   Ctrl+A 详情   Ctrl+C 停止",
+			footer:     "↑↓ 选择   Ctrl+A 详情   Ctrl+P 复制   Ctrl+C 停止",
+			copyFooter: "复制模式   Ctrl+P 返回   Ctrl+C 停止",
 			outputLog:  "uni: 完整输出日志: %s\n",
 			fallback:   "uni: compact TUI 已禁用，使用普通输出: %v\n",
 			logWarning: "uni: 输出日志警告: %v\n",
@@ -180,7 +185,8 @@ func compactMessagesForLocale(chinese bool) compactMessages {
 		running:    "running",
 		available:  "available",
 		memory:     "RAM",
-		footer:     "↑↓ Select   Ctrl+A Details   Ctrl+C Stop",
+		footer:     "↑↓ Select   Ctrl+A Details   Ctrl+P Copy   Ctrl+C Stop",
+		copyFooter: "Copy mode   Ctrl+P Resume   Ctrl+C Stop",
 		outputLog:  "uni: output log: %s\n",
 		fallback:   "uni: compact TUI disabled; using line output: %v\n",
 		logWarning: "uni: output log warning: %v\n",
@@ -200,13 +206,14 @@ func newCompactTUI(input, terminal *os.File) *compactTUI {
 	names := []string{"Graph", "Kernel", "Startup", "Main"}
 	messages := compactMessagesForLocale(false)
 	tui := &compactTUI{
-		terminal: terminal,
-		input:    input,
-		byName:   make(map[string]*compactTask, len(names)),
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
-		dirty:    true,
-		messages: messages,
+		terminal:  terminal,
+		input:     input,
+		byName:    make(map[string]*compactTask, len(names)),
+		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
+		dirty:     true,
+		spinnerAt: time.Now(),
+		messages:  messages,
 	}
 	for _, name := range names {
 		task := &compactTask{name: name, label: messages.taskLabels[name], status: compactTaskPending, logs: newCompactRing(compactTUILogLines)}
@@ -326,7 +333,11 @@ func (tui *compactTUI) consume(line string) {
 	}
 	if strings.HasPrefix(line, "uni: phases=") || strings.HasPrefix(line, "uni: package=") ||
 		strings.HasPrefix(line, "uni: output=") || strings.HasPrefix(line, "#### build completed successfully") {
-		tui.summaries = append(tui.summaries, line)
+		summary := line
+		if strings.HasPrefix(line, "#### build completed successfully") && displayLine != "" {
+			summary = displayLine
+		}
+		tui.summaries = append(tui.summaries, summary)
 	}
 	if strings.HasPrefix(line, "FAILED:") || strings.HasPrefix(line, "FAILED ") || strings.Contains(line, "ninja failed") {
 		tui.summaries = append(tui.summaries, line)
@@ -535,7 +546,7 @@ func (tui *compactTUI) taskLine(task *compactTask) string {
 		}
 		return line
 	default:
-		return fmt.Sprintf("%s ○ %s", prefix, tui.messages.pending)
+		return fmt.Sprintf("%s □ %s", prefix, tui.messages.pending)
 	}
 }
 
@@ -546,7 +557,6 @@ func (tui *compactTUI) frame(force bool) string {
 		return ""
 	}
 	tui.dirty = false
-	tui.spinner = (tui.spinner + 1) % len(compactTUISpinner)
 	size := compactTerminalSize(tui.terminal)
 	width := int(size.cols)
 	if width < 40 {
@@ -595,7 +605,11 @@ func (tui *compactTUI) frame(force bool) string {
 		}
 	}
 	output.WriteByte('\n')
-	output.WriteString(truncateCompactLine(tui.messages.footer, lineWidth))
+	footer := tui.messages.footer
+	if tui.copyMode {
+		footer = tui.messages.copyFooter
+	}
+	output.WriteString(truncateCompactLine(footer, lineWidth))
 	output.WriteByte('\n')
 	if tui.active != nil && tui.active.latest != "" && (!tui.details || tui.scrollOffset == 0) {
 		latest := truncateCompactDisplayLine(tui.active.latest, lineWidth-2)
@@ -603,7 +617,14 @@ func (tui *compactTUI) frame(force bool) string {
 		output.WriteString(latest)
 		output.WriteByte('\n')
 	}
-	return output.String()
+	return strings.TrimSuffix(output.String(), "\n")
+}
+
+func compactFrameLines(frame string) int {
+	if frame == "" {
+		return 0
+	}
+	return strings.Count(frame, "\n") + 1
 }
 
 func truncateCompactDisplayLine(line string, width int) string {
@@ -624,38 +645,45 @@ func (tui *compactTUI) render(force bool) {
 	if frame == "" || tui.terminal == nil {
 		return
 	}
-	prefix := ""
-	if tui.rendered > 0 {
-		prefix = fmt.Sprintf("\x1b[%dA\x1b[1G", tui.rendered)
+	previousRendered := tui.rendered
+	prefix := "\x1b[1G"
+	if previousRendered > 1 {
+		prefix = fmt.Sprintf("\x1b[%dA\x1b[1G", previousRendered-1)
 	}
 	var output strings.Builder
-	output.Grow(len(prefix) + len(frame) + tui.rendered*4)
+	output.Grow(len(prefix) + len(frame) + previousRendered*4)
 	output.WriteString(prefix)
-	for _, line := range strings.SplitAfter(frame, "\n") {
-		if line == "" {
-			continue
+	for index, line := range strings.Split(frame, "\n") {
+		if index > 0 {
+			output.WriteByte('\n')
 		}
 		output.WriteString("\x1b[2K\x1b[1G")
 		output.WriteString(line)
 	}
 	output.WriteString("\x1b[J")
 	_, _ = io.WriteString(tui.terminal, output.String())
-	tui.rendered = strings.Count(frame, "\n")
+	tui.rendered = compactFrameLines(frame)
 }
 
 func (tui *compactTUI) animate() {
 	tui.mu.Lock()
+	if tui.copyMode {
+		tui.mu.Unlock()
+		return
+	}
 	shouldRender := tui.dirty
 	if !tui.scrollPaused {
 		for _, task := range tui.tasks {
 			if task.status == compactTaskRunning {
-				shouldRender = true
+				if time.Since(tui.spinnerAt) >= compactTUISpinnerInterval {
+					tui.spinner = (tui.spinner + 1) % len(compactTUISpinner)
+					tui.spinnerAt = time.Now()
+					tui.dirty = true
+					shouldRender = true
+				}
 				break
 			}
 		}
-	}
-	if shouldRender {
-		tui.dirty = true
 	}
 	tui.mu.Unlock()
 	if shouldRender {
@@ -720,6 +748,9 @@ func (tui *compactTUI) handleInput(input []byte) []byte {
 			tui.dirty = true
 			tui.mu.Unlock()
 			input = input[1:]
+		case input[0] == 0x10:
+			tui.toggleCopyMode()
+			input = input[1:]
 		case input[0] == 'k' || input[0] == 'K':
 			tui.resumeLiveView()
 			tui.moveSelection(-1)
@@ -782,6 +813,8 @@ func (tui *compactTUI) handleInput(input []byte) []byte {
 								tui.scrollPaused = false
 								tui.dirty = true
 								tui.mu.Unlock()
+							case int('p'):
+								tui.toggleCopyMode()
 							case int('c'):
 								if tui.interrupt != nil {
 									tui.interrupt()
@@ -851,6 +884,28 @@ func (tui *compactTUI) handleInput(input []byte) []byte {
 		}
 	}
 	return input
+}
+
+func (tui *compactTUI) toggleCopyMode() {
+	tui.mu.Lock()
+	tui.copyMode = !tui.copyMode
+	copyMode := tui.copyMode
+	tui.dirty = true
+	tui.mu.Unlock()
+	if tui.terminal == nil {
+		return
+	}
+	if copyMode {
+		tui.render(true)
+		tui.renderMu.Lock()
+		_, _ = io.WriteString(tui.terminal, "\x1b[?1006l\x1b[?1000l\x1b[?25h")
+		tui.renderMu.Unlock()
+		return
+	}
+	tui.renderMu.Lock()
+	_, _ = io.WriteString(tui.terminal, "\x1b[?25l\x1b[?1000h\x1b[?1006h")
+	tui.renderMu.Unlock()
+	tui.render(true)
 }
 
 func (tui *compactTUI) handleMouseWheel(button int) {
@@ -935,7 +990,7 @@ func (tui *compactTUI) finish(err error) {
 	tui.mu.Lock()
 	defer tui.mu.Unlock()
 	if tui.active != nil {
-		if err != nil {
+		if err != nil && tui.active.status == compactTaskRunning {
 			tui.active.status = compactTaskFailed
 		} else if tui.active.status == compactTaskRunning {
 			tui.active.status = compactTaskDone
@@ -950,7 +1005,28 @@ func (tui *compactTUI) finish(err error) {
 func (tui *compactTUI) close() {
 	tui.once.Do(func() { close(tui.stop) })
 	<-tui.done
+	tui.clearRenderedFrame()
 	_, _ = io.WriteString(tui.terminal, "\x1b[?1006l\x1b[?1000l\x1b[<u\x1b[?25h")
+}
+
+func (tui *compactTUI) clearRenderedFrame() {
+	if tui == nil || tui.terminal == nil {
+		return
+	}
+	tui.renderMu.Lock()
+	defer tui.renderMu.Unlock()
+	tui.mu.Lock()
+	rendered := tui.rendered
+	tui.rendered = 0
+	tui.mu.Unlock()
+	if rendered < 1 {
+		return
+	}
+	if rendered == 1 {
+		_, _ = io.WriteString(tui.terminal, "\r\x1b[J")
+		return
+	}
+	_, _ = fmt.Fprintf(tui.terminal, "\r\x1b[%dA\x1b[J", rendered-1)
 }
 
 func (tui *compactTUI) summaryLines() []string {
