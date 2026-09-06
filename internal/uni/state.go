@@ -170,9 +170,19 @@ func sourceGraphFingerprint(sourceRoot, outDir string) (string, int64, error) {
 		}
 		clean := filepath.Clean(path)
 		if entry.IsDir() {
-			if clean == outDir || entry.Name() == ".repo" || entry.Name() == ".git" {
+			if clean == outDir || entry.Name() == ".repo" || entry.Name() == ".git" ||
+				entry.Name() == ".codegraph" {
 				return filepath.SkipDir
 			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			relative, err := filepath.Rel(sourceRoot, clean)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(hash, "dir\x00%s\x00%d\n", filepath.ToSlash(relative), info.ModTime().UnixNano())
 			return nil
 		}
 		relative, err := filepath.Rel(sourceRoot, clean)

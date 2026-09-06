@@ -479,7 +479,6 @@ func Run(ctx context.Context, options Options) error {
 		fmt.Printf("uni: reuse graph\n")
 		report.event("graph reused=true")
 	} else {
-		runner.disableIncrementalAnalysis()
 		fmt.Printf("uni: prepare graph, -j%d\n", jobs)
 		if _, err := runner.runReported(ctx, report, &summary, "graph-analysis", "--uni-prepare-mode", "prepare", statePath, graphArgs, jobs); err != nil {
 			return err

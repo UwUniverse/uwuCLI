@@ -95,8 +95,8 @@ func TestCleanBuildThroughputDefaults(t *testing.T) {
 		t.Fatalf("batch=%d did not select one full graph", batch)
 	}
 	decision := (&poolAdmission{}).decide(options.MaxJobs, snapshot, nil, 4)
-	if decision.highmem != 18 || decision.r8 != 18 || decision.rust != 5 || decision.java != 12 || decision.kotlin != 6 {
-		t.Fatalf("throughput pools = %+v, want 18/18/5/12/6", decision)
+	if decision.highmem != 6 || decision.r8 != 5 || decision.rust != 5 || decision.java != 12 || decision.kotlin != 5 {
+		t.Fatalf("throughput pools = %+v, want 6/5/5/12/5", decision)
 	}
 	if got := phaseArgs(options, []string{"otapackage"}, 18, false); !reflect.DeepEqual(got, []string{"-j18", "otapackage"}) {
 		t.Fatalf("phase args = %v", got)

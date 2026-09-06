@@ -496,6 +496,66 @@ func TestReuseStateRejectsGraphSourceChange(t *testing.T) {
 	}
 }
 
+func TestReuseStateRejectsNewGlobSource(t *testing.T) {
+	directory := t.TempDir()
+	outDir := filepath.Join(directory, "out")
+	sourceDir := filepath.Join(directory, "module", "src")
+	if err := os.MkdirAll(sourceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "Android.bp"), []byte("filegroup {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	graph := filepath.Join(outDir, "combined.ninja")
+	buildDate := filepath.Join(outDir, "build_date.txt")
+	if err := os.WriteFile(graph, []byte("build droid: phony\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(buildDate, []byte("123\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	graphInfo, err := os.Stat(graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dateInfo, err := os.Stat(buildDate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, _, err := sourceGraphFingerprint(directory, outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(outDir, "state.json")
+	state := State{
+		Version: stateVersion, SourceRoot: directory, OutDir: outDir,
+		TargetProduct: "uwu_test", TargetRelease: "cp2a", BuildVariant: "userdebug",
+		BuildDateTime: "123", BuildDateTimeFile: buildDate,
+		GraphFiles: []GraphFile{
+			{Path: graph, Size: graphInfo.Size(), ModTimeNano: graphInfo.ModTime().UnixNano()},
+			{Path: buildDate, Size: dateInfo.Size(), ModTimeNano: dateInfo.ModTime().UnixNano()},
+		},
+		SourceFingerprint: fingerprint,
+	}
+	if err := SaveState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	if err := os.WriteFile(filepath.Join(sourceDir, "NewSource.kt"), []byte("class NewSource\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, reused, err := ReuseState(statePath, directory, outDir, "uwu_test", "cp2a", "userdebug", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused {
+		t.Fatal("graph containing a stale glob result was reused")
+	}
+}
+
 func TestForceReuseStatePersistsCurrentSourceFingerprint(t *testing.T) {
 	directory := t.TempDir()
 	outDir := filepath.Join(directory, "out")
