@@ -87,10 +87,10 @@ func AnalysisMemoryLimit(total, available int64) int64 {
 	}
 	// Android.bp analysis has non-Go memory and is followed by Kati. Leaving a
 	// physical reserve is faster than letting the Go heap reclaim through swap.
-	reserve := max(4*gibibyte, total/5)
+	reserve := max(4*gibibyte, total/4)
 	limit := total - reserve
-	if available > 2*gibibyte {
-		limit = min(limit, available-2*gibibyte)
+	if available > 0 {
+		limit = min(limit, max(available/2, available-4*gibibyte))
 	}
 	if limit > 0 {
 		return limit
@@ -170,19 +170,11 @@ func InitialBatchSize(configured, targets int, snapshot MemorySnapshot) int {
 }
 
 func HighmemJobs(maxJobs int, snapshot MemorySnapshot) int {
-	return burstPoolJobs(maxJobs, snapshot)
+	return memoryPoolJobs(maxJobs, snapshot, 4*gibibyte)
 }
 
 func R8Jobs(maxJobs int, snapshot MemorySnapshot) int {
-	return burstPoolJobs(maxJobs, snapshot)
-}
-
-func burstPoolJobs(maxJobs int, snapshot MemorySnapshot) int {
-	limit := MaximumJobs(maxJobs)
-	if snapshot.Available <= 0 || snapshot.Available >= 8*gibibyte {
-		return limit
-	}
-	return max(1, min(limit, int(snapshot.Available/(2*gibibyte))))
+	return memoryPoolJobs(maxJobs, snapshot, 5*gibibyte)
 }
 
 func memoryPoolJobs(maxJobs int, snapshot MemorySnapshot, bytesPerJob int64) int {
@@ -215,10 +207,7 @@ func RustJobs(maxJobs int, snapshot MemorySnapshot, codegenUnits int) int {
 }
 
 func KotlinJobs(maxJobs int, snapshot MemorySnapshot) int {
-	// Equal JVM arguments let the build-tools client reuse one Kotlin daemon.
-	// Four GiB per admitted edge keeps six requests available on this host while
-	// retaining physical memory for javac, clang and the daemon's 8 GiB heap.
-	return memoryPoolJobs(maxJobs, snapshot, 4*gibibyte)
+	return memoryPoolJobs(maxJobs, snapshot, 5*gibibyte)
 }
 
 func formatBytes(value int64) string {

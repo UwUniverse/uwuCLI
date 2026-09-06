@@ -43,6 +43,7 @@ type commandRunner struct {
 	admission               poolAdmission
 	forceLocalNinja         bool
 	kernelJobs              int
+	memoryRetries           int
 }
 
 func phasedNinjaExecutor(requested string) string {
@@ -180,11 +181,6 @@ func newCommandRunner(ctx context.Context, top string, keyValues []string) (*com
 	return runner, nil
 }
 
-func (runner *commandRunner) disableIncrementalAnalysis() {
-	runner.baseEnv = overrideEnvironment(runner.baseEnv, "SOONG_INCREMENTAL_ANALYSIS=false")
-	runner.incrementalAnalysis = false
-}
-
 func (runner *commandRunner) runReported(ctx context.Context, report *debugReport, summary *buildSummary, name, mode, phase, statePath string, args []string, maxJobs int) (SegmentSample, error) {
 	tui := compactTUIFromContext(ctx)
 	if tui != nil {
@@ -220,6 +216,12 @@ func (runner *commandRunner) runReported(ctx context.Context, report *debugRepor
 	}
 	if tui != nil {
 		tui.phaseFinished(name, err)
+	}
+	if jobs, retry := memoryRetryJobs(err, ctx.Err(), maxJobs, runner.memoryRetries); retry {
+		runner.memoryRetries++
+		fmt.Printf("uni: sustained memory pressure; resume completed outputs with -j%d (retry %d/2)\n", jobs, runner.memoryRetries)
+		return runner.runReported(ctx, report, summary, name, mode, phase, statePath,
+			replaceParallelArgs(args, jobs), jobs)
 	}
 	return sample, err
 }
@@ -294,7 +296,7 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 		if value, set := environmentValue(runner.baseEnv, "SOONG_ANALYSIS_GC_PERCENT"); set {
 			analysisGCPercent, _ = strconv.Atoi(value)
 		} else {
-			analysisGCPercent = 200
+			analysisGCPercent = 100
 			overrides = append(overrides, "SOONG_ANALYSIS_GC_PERCENT="+strconv.Itoa(analysisGCPercent))
 		}
 		fmt.Printf("uni: Android.bp analysis memory limit %s, GOGC=%d\n",
@@ -398,14 +400,37 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 	monitor := startMemoryMonitor(rootIdentity, runner.outDir, telemetrySink)
 	done := make(chan struct{})
 	cancelFinished := make(chan struct{})
+	pressureTriggered := false
 	go func() {
 		defer close(cancelFinished)
-		select {
-		case <-ctx.Done():
-			terminateBuildProcessTree(rootIdentity, scopeUnit, runner.outDir)
-		case <-done:
-			if ctx.Err() != nil {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		var pressure memoryPressureGuard
+		for {
+			select {
+			case <-ctx.Done():
 				terminateBuildProcessTree(rootIdentity, scopeUnit, runner.outDir)
+				return
+			case <-done:
+				if ctx.Err() != nil {
+					terminateBuildProcessTree(rootIdentity, scopeUnit, runner.outDir)
+				}
+				return
+			case now := <-ticker.C:
+				if mode != "--uni-ninja-mode" {
+					continue
+				}
+				memory, memoryErr := ReadMemorySnapshot()
+				psi, psiErr := readMemoryPSI()
+				if memoryErr != nil || psiErr != nil {
+					pressure = memoryPressureGuard{}
+					continue
+				}
+				if pressure.observe(now, memory, psi.full.avg10) {
+					pressureTriggered = true
+					terminateBuildProcessTree(rootIdentity, scopeUnit, runner.outDir)
+					return
+				}
 			}
 		}
 	}()
@@ -447,6 +472,12 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 	}
 	if leaseErr != nil && err == nil {
 		return sample, fmt.Errorf("clear active build: %w", leaseErr)
+	}
+	if pressureTriggered && err != nil && ctx.Err() == nil && checkpointErr == nil && leaseErr == nil {
+		if len(runningUniProcesses(runner.outDir)) != 0 {
+			return sample, fmt.Errorf("memory recovery stopped: build processes remain")
+		}
+		return sample, errMemoryPressure
 	}
 	if err != nil {
 		if ctx.Err() != nil {

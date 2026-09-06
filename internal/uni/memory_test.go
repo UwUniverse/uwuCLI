@@ -10,11 +10,11 @@ import (
 
 func TestAnalysisMemoryLimitUsesTotalAndAvailable(t *testing.T) {
 	total := int64(30 * gibibyte)
-	if got := AnalysisMemoryLimit(total, total); got != 24*gibibyte {
-		t.Fatalf("got %s, want 24.0 GiB", formatBytes(got))
+	if got := AnalysisMemoryLimit(total, total); got != 45*gibibyte/2 {
+		t.Fatalf("got %s, want 22.5 GiB", formatBytes(got))
 	}
-	if got := AnalysisMemoryLimit(total, 20*gibibyte); got != 18*gibibyte {
-		t.Fatalf("got %s, want 18.0 GiB", formatBytes(got))
+	if got := AnalysisMemoryLimit(total, 20*gibibyte); got != 16*gibibyte {
+		t.Fatalf("got %s, want 16.0 GiB", formatBytes(got))
 	}
 }
 
@@ -25,11 +25,19 @@ func TestAnalysisMemoryLimitKeepsMinimumReserve(t *testing.T) {
 	}
 }
 
+func TestAnalysisMemoryLimitWithLittleAvailableMemory(t *testing.T) {
+	for _, available := range []int64{gibibyte / 2, gibibyte, 2 * gibibyte, 4 * gibibyte} {
+		if got := AnalysisMemoryLimit(32*gibibyte, available); got != available/2 {
+			t.Fatalf("available=%d limit=%d, want %d", available, got, available/2)
+		}
+	}
+}
+
 func TestAnalysisMemoryLimitForObservedMachine(t *testing.T) {
 	total := int64(32577777664)
 	available := int64(28937281536)
 	limit := AnalysisMemoryLimit(total, available)
-	if want := total - total/5; limit != want {
+	if want := total - total/4; limit != want {
 		t.Fatalf("got %s, want %s", formatBytes(limit), formatBytes(want))
 	}
 	if limit > total-4*gibibyte {
@@ -82,11 +90,27 @@ func TestInitialBatchSizeDoesNotThrottleNearOOM(t *testing.T) {
 
 func TestHeavyPoolsBalanceMemoryAndThroughput(t *testing.T) {
 	snapshot := MemorySnapshot{Available: 27 * gibibyte, SwapFree: 30 * gibibyte}
-	if got := HighmemJobs(18, snapshot); got != 18 {
-		t.Fatalf("HighmemJobs() = %d, want 18", got)
+	if got := HighmemJobs(18, snapshot); got != 6 {
+		t.Fatalf("HighmemJobs() = %d, want 6", got)
 	}
-	if got := R8Jobs(18, snapshot); got != 18 {
-		t.Fatalf("R8Jobs() = %d, want 18", got)
+	if got := R8Jobs(18, snapshot); got != 4 {
+		t.Fatalf("R8Jobs() = %d, want 4", got)
+	}
+}
+
+func TestPoolsAvoidThresholdCliffWithTwentySixGiBAvailable(t *testing.T) {
+	snapshot := MemorySnapshot{Available: 26 * gibibyte, SwapFree: 40 * gibibyte}
+	if got := HighmemJobs(18, snapshot); got != 5 {
+		t.Fatalf("HighmemJobs() = %d, want 5", got)
+	}
+	if got := R8Jobs(18, snapshot); got != 4 {
+		t.Fatalf("R8Jobs() = %d, want 4", got)
+	}
+	if got := JavaJobs(18, snapshot); got != 11 {
+		t.Fatalf("JavaJobs() = %d, want 11", got)
+	}
+	if got := KotlinJobs(18, snapshot); got != 4 {
+		t.Fatalf("KotlinJobs() = %d, want 4", got)
 	}
 }
 
@@ -112,8 +136,8 @@ func TestCompilerPoolsBalanceMemoryAndThroughput(t *testing.T) {
 	if got := RustJobs(18, snapshot, 4); got != 5 {
 		t.Fatalf("RustJobs() = %d, want 5", got)
 	}
-	if got := KotlinJobs(18, snapshot); got != 6 {
-		t.Fatalf("KotlinJobs() = %d, want 6", got)
+	if got := KotlinJobs(18, snapshot); got != 4 {
+		t.Fatalf("KotlinJobs() = %d, want 4", got)
 	}
 }
 
