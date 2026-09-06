@@ -109,6 +109,30 @@ func TestCompactTUITracksPhaseProgressAndTelemetry(t *testing.T) {
 	}
 }
 
+func TestCompactTUIDelayedGraphOutputDoesNotStealMainPhase(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	tui.phaseStarted("ninja", 18)
+	tui.consume("uni: reuse graph")
+	tui.consume("[ 42% 42/100] target")
+
+	main := tui.byName["Main"]
+	if tui.active != main || main.percent != 42 || main.logs.len() != 1 {
+		t.Fatalf("delayed graph output stole main phase: active=%v main=%+v", tui.active, main)
+	}
+	if graph := tui.byName["Graph"]; graph.status != compactTaskDone || graph.logs.len() != 1 {
+		t.Fatalf("graph marker was not retained: %+v", graph)
+	}
+	tui.selected = 3
+	tui.toggleDetails()
+	if frame := tui.frame(true); !strings.Contains(frame, "[ 42% 42/100] target") {
+		t.Fatalf("main details are missing: %q", frame)
+	}
+	tui.phaseFinished("ninja", nil)
+	if line := tui.taskLine(main); !strings.Contains(line, "42% 42/100") {
+		t.Fatalf("completed phase lost progress: %q", line)
+	}
+}
+
 func TestCompactTUIFinishPreservesCompletedPhase(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
 	tui.phaseStarted("kernel", 18)
@@ -414,6 +438,12 @@ func TestCompactTUIHandlesCtrlA(t *testing.T) {
 	}
 	if !tui.details {
 		t.Fatal("Kitty Ctrl+A did not enable details")
+	}
+	if pending := tui.handleInput([]byte("\x1b[27;5;97~")); len(pending) != 0 {
+		t.Fatalf("xterm Ctrl+A was not consumed: %q", pending)
+	}
+	if tui.details {
+		t.Fatal("xterm Ctrl+A did not disable details")
 	}
 }
 

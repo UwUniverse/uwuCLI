@@ -303,33 +303,43 @@ func (tui *compactTUI) consume(line string) {
 	}
 	tui.mu.Lock()
 	defer tui.mu.Unlock()
+	target := tui.active
 
 	switch {
 	case strings.HasPrefix(line, "uni: reuse graph"):
 		task := tui.byName["Graph"]
 		task.status = compactTaskDone
 		task.duration = 0
-		tui.active = task
+		target = task
+		if tui.active == nil || tui.active == task || tui.active.status != compactTaskRunning {
+			tui.active = task
+		}
 	case strings.Contains(line, "Analyzing Android.bp files"):
 		task := tui.byName["Graph"]
 		if task.status == compactTaskPending {
 			task.status = compactTaskRunning
 			task.started = time.Now()
 		}
-		tui.active = task
+		target = task
+		if tui.active == nil || tui.active == task || tui.active.status != compactTaskRunning {
+			tui.active = task
+		}
 	}
 
 	if tui.active == nil {
 		tui.active = tui.byName["Graph"]
 	}
-	if displayLine != "" {
-		tui.active.latest = displayLine
+	if target == nil {
+		target = tui.active
 	}
-	tui.active.logs.add(line)
+	if displayLine != "" {
+		target.latest = displayLine
+	}
+	target.logs.add(line)
 	if percent, done, total, ok := parseCompactProgress(line); ok {
-		tui.active.percent = percent
-		tui.active.done = done
-		tui.active.total = total
+		target.percent = percent
+		target.done = done
+		target.total = total
 	}
 	if strings.HasPrefix(line, "uni: phases=") || strings.HasPrefix(line, "uni: package=") ||
 		strings.HasPrefix(line, "uni: output=") || strings.HasPrefix(line, "#### build completed successfully") {
@@ -535,7 +545,11 @@ func (tui *compactTUI) taskLine(task *compactTask) string {
 	prefix := compactPadRight(task.label, 9)
 	switch task.status {
 	case compactTaskDone:
-		return fmt.Sprintf("%s ■ %s", prefix, compactDuration(duration))
+		line := fmt.Sprintf("%s ■ %s", prefix, compactDuration(duration))
+		if task.total > 0 {
+			line += fmt.Sprintf("  %d%% %d/%d", task.percent, task.done, task.total)
+		}
+		return line
 	case compactTaskFailed:
 		return fmt.Sprintf("%s × %s  %s", prefix, tui.messages.failed, compactDuration(duration))
 	case compactTaskRunning:
@@ -741,12 +755,7 @@ func (tui *compactTUI) handleInput(input []byte) []byte {
 	for len(input) > 0 {
 		switch {
 		case input[0] == 0x01:
-			tui.mu.Lock()
-			tui.details = !tui.details
-			tui.scrollOffset = 0
-			tui.scrollPaused = false
-			tui.dirty = true
-			tui.mu.Unlock()
+			tui.toggleDetails()
 			input = input[1:]
 		case input[0] == 0x10:
 			tui.toggleCopyMode()
@@ -807,12 +816,7 @@ func (tui *compactTUI) handleInput(input []byte) []byte {
 						if codeErr == nil && modifierErr == nil && modifiers&4 != 0 {
 							switch code {
 							case int('a'):
-								tui.mu.Lock()
-								tui.details = !tui.details
-								tui.scrollOffset = 0
-								tui.scrollPaused = false
-								tui.dirty = true
-								tui.mu.Unlock()
+								tui.toggleDetails()
 							case int('p'):
 								tui.toggleCopyMode()
 							case int('c'):
@@ -864,7 +868,16 @@ func (tui *compactTUI) handleInput(input []byte) []byte {
 				tui.resumeLiveView()
 				tui.moveSelection(1)
 			case '~':
-				code, err := strconv.Atoi(strings.Split(params, ";")[0])
+				fields := strings.Split(params, ";")
+				if len(fields) >= 3 && fields[0] == "27" {
+					modifiers, modifierErr := strconv.Atoi(fields[1])
+					code, codeErr := strconv.Atoi(fields[2])
+					if modifierErr == nil && codeErr == nil && tui.handleModifiedKey(code, modifiers) {
+						input = input[final+1:]
+						continue
+					}
+				}
+				code, err := strconv.Atoi(fields[0])
 				if err == nil {
 					switch code {
 					case 1, 7:
@@ -884,6 +897,34 @@ func (tui *compactTUI) handleInput(input []byte) []byte {
 		}
 	}
 	return input
+}
+
+func (tui *compactTUI) toggleDetails() {
+	tui.mu.Lock()
+	tui.details = !tui.details
+	tui.scrollOffset = 0
+	tui.scrollPaused = false
+	tui.dirty = true
+	tui.mu.Unlock()
+}
+
+func (tui *compactTUI) handleModifiedKey(code, modifiers int) bool {
+	if modifiers&4 == 0 {
+		return false
+	}
+	switch code {
+	case int('a'), int('A'):
+		tui.toggleDetails()
+	case int('p'), int('P'):
+		tui.toggleCopyMode()
+	case int('c'), int('C'):
+		if tui.interrupt != nil {
+			tui.interrupt()
+		}
+	default:
+		return false
+	}
+	return true
 }
 
 func (tui *compactTUI) toggleCopyMode() {
