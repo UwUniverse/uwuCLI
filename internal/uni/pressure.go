@@ -4,6 +4,7 @@
 package uni
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"strings"
@@ -11,6 +12,14 @@ import (
 )
 
 var errMemoryPressure = errors.New("sustained memory pressure: build stopped and recovery state saved")
+
+const (
+	memoryEmergencyPSI         = 45.0
+	memoryRecoveryPSI          = 10.0
+	memoryRecoverySamples      = 3
+	memoryRecoveryPollInterval = time.Second
+	memoryRecoveryTimeout      = 45 * time.Second
+)
 
 func memoryRetryJobs(err, contextErr error, jobs, retries int) (int, bool) {
 	if !errors.Is(err, errMemoryPressure) || contextErr != nil || jobs <= 1 || retries >= 2 {
@@ -30,6 +39,9 @@ func (guard *memoryPressureGuard) observe(now time.Time, memory MemorySnapshot, 
 	}
 	reserve := max(3*gibibyte, memory.Total/8)
 	pressured := memory.Available < reserve && fullAvg10 >= 20
+	if fullAvg10 >= memoryEmergencyPSI {
+		pressured = true
+	}
 	if memory.Available >= 0 && memory.Available < gibibyte/2 {
 		pressured = true
 	}
@@ -41,6 +53,47 @@ func (guard *memoryPressureGuard) observe(now time.Time, memory MemorySnapshot, 
 		guard.since = now
 	}
 	return now.Sub(guard.since) >= 6*time.Second
+}
+
+type memoryRecoveryGuard struct {
+	healthy int
+}
+
+func (guard *memoryRecoveryGuard) observe(memory MemorySnapshot, fullAvg10 float64) bool {
+	if memory.Total <= 0 || memory.Available < 0 {
+		guard.healthy = 0
+		return false
+	}
+	reserve := max(4*gibibyte, memory.Total/8)
+	if memory.Available < reserve || fullAvg10 > memoryRecoveryPSI {
+		guard.healthy = 0
+		return false
+	}
+	guard.healthy++
+	return guard.healthy >= memoryRecoverySamples
+}
+
+func waitForMemoryRecovery(ctx context.Context, timeout time.Duration) (time.Duration, bool) {
+	started := time.Now()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(memoryRecoveryPollInterval)
+	defer ticker.Stop()
+	var guard memoryRecoveryGuard
+	for {
+		memory, memoryErr := ReadMemorySnapshot()
+		psi, psiErr := readMemoryPSI()
+		if memoryErr == nil && psiErr == nil && guard.observe(memory, psi.full.avg10) {
+			return time.Since(started), true
+		}
+		select {
+		case <-ctx.Done():
+			return time.Since(started), false
+		case <-deadline.C:
+			return time.Since(started), false
+		case <-ticker.C:
+		}
+	}
 }
 
 func replaceParallelArgs(args []string, jobs int) []string {

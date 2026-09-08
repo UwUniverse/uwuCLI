@@ -219,7 +219,21 @@ func (runner *commandRunner) runReported(ctx context.Context, report *debugRepor
 	}
 	if jobs, retry := memoryRetryJobs(err, ctx.Err(), maxJobs, runner.memoryRetries); retry {
 		runner.memoryRetries++
-		fmt.Printf("uni: sustained memory pressure; resume completed outputs with -j%d (retry %d/2)\n", jobs, runner.memoryRetries)
+		fmt.Printf("uni: sustained memory pressure; waiting before -j%d retry %d/2\n", jobs, runner.memoryRetries)
+		if report != nil {
+			report.event("memory_recovery_wait retry=%d jobs=%d timeout=%s", runner.memoryRetries, jobs, memoryRecoveryTimeout)
+		}
+		waited, recovered := waitForMemoryRecovery(ctx, memoryRecoveryTimeout)
+		if report != nil {
+			report.event("memory_recovery_wait_end retry=%d jobs=%d elapsed=%s recovered=%t", runner.memoryRetries, jobs, waited.Round(time.Millisecond), recovered)
+		}
+		if !recovered {
+			if ctx.Err() != nil {
+				return sample, ctx.Err()
+			}
+			return sample, fmt.Errorf("%w: pressure remained high for %s", errMemoryPressure, waited.Round(time.Second))
+		}
+		fmt.Printf("uni: memory pressure recovered after %s; resuming completed outputs\n", waited.Round(time.Second))
 		return runner.runReported(ctx, report, summary, name, mode, phase, statePath,
 			replaceParallelArgs(args, jobs), jobs)
 	}
