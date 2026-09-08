@@ -79,6 +79,50 @@ func TestPressureGuardAllowsHealthyParallelism(t *testing.T) {
 	}
 }
 
+func TestPressureGuardStopsExtremePSIWithFreeMemory(t *testing.T) {
+	start := time.Unix(100, 0)
+	memory := MemorySnapshot{Total: 32 * gibibyte, Available: 14 * gibibyte}
+	var guard memoryPressureGuard
+	for i := 0; i < 3; i++ {
+		if guard.observe(start.Add(time.Duration(i)*2*time.Second), memory, memoryEmergencyPSI) {
+			t.Fatal("transient extreme pressure stopped the build")
+		}
+	}
+	if !guard.observe(start.Add(6*time.Second), memory, memoryEmergencyPSI) {
+		t.Fatal("extreme PSI did not stop the build before oomd")
+	}
+}
+
+func TestMemoryRecoveryGuardRequiresStableRecovery(t *testing.T) {
+	healthy := MemorySnapshot{Total: 32 * gibibyte, Available: 20 * gibibyte}
+	var guard memoryRecoveryGuard
+	for i := 1; i < memoryRecoverySamples; i++ {
+		if guard.observe(healthy, memoryRecoveryPSI) {
+			t.Fatal("unstable recovery was accepted")
+		}
+	}
+	if !guard.observe(healthy, memoryRecoveryPSI) {
+		t.Fatal("stable recovery was not accepted")
+	}
+}
+
+func TestMemoryRecoveryGuardResetsOnPressure(t *testing.T) {
+	healthy := MemorySnapshot{Total: 32 * gibibyte, Available: 20 * gibibyte}
+	pressured := MemorySnapshot{Total: 32 * gibibyte, Available: 2 * gibibyte}
+	var guard memoryRecoveryGuard
+	guard.observe(healthy, 0)
+	guard.observe(healthy, 0)
+	if guard.observe(pressured, 0) {
+		t.Fatal("low memory was accepted as recovered")
+	}
+	if guard.observe(healthy, 0) {
+		t.Fatal("recovery samples survived renewed pressure")
+	}
+	if guard.observe(healthy, memoryRecoveryPSI+1) {
+		t.Fatal("high PSI was accepted as recovered")
+	}
+}
+
 func TestReplaceParallelArgsPreservesBuildInputs(t *testing.T) {
 	for _, args := range [][]string{
 		{"-j18", "Settings", "A=B"},
