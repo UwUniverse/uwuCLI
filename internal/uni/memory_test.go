@@ -13,8 +13,8 @@ func TestAnalysisMemoryLimitUsesTotalAndAvailable(t *testing.T) {
 	if got := AnalysisMemoryLimit(total, total); got != 45*gibibyte/2 {
 		t.Fatalf("got %s, want 22.5 GiB", formatBytes(got))
 	}
-	if got := AnalysisMemoryLimit(total, 20*gibibyte); got != 16*gibibyte {
-		t.Fatalf("got %s, want 16.0 GiB", formatBytes(got))
+	if got := AnalysisMemoryLimit(total, 20*gibibyte); got != 15*gibibyte {
+		t.Fatalf("got %s, want 15.0 GiB", formatBytes(got))
 	}
 }
 
@@ -37,7 +37,7 @@ func TestAnalysisMemoryLimitForObservedMachine(t *testing.T) {
 	total := int64(32577777664)
 	available := int64(28937281536)
 	limit := AnalysisMemoryLimit(total, available)
-	if want := total - total/4; limit != want {
+	if want := available - available/4; limit != want {
 		t.Fatalf("got %s, want %s", formatBytes(limit), formatBytes(want))
 	}
 	if limit > total-4*gibibyte {

@@ -90,7 +90,10 @@ func AnalysisMemoryLimit(total, available int64) int64 {
 	reserve := max(4*gibibyte, total/4)
 	limit := total - reserve
 	if available > 0 {
-		limit = min(limit, max(available/2, available-4*gibibyte))
+		// The Go limit excludes mapped files and can be exceeded by live heap.
+		// Reserve headroom from currently available RAM, not only total RAM.
+		headroom := max(4*gibibyte, available/4)
+		limit = min(limit, max(available/2, available-headroom))
 	}
 	if limit > 0 {
 		return limit
