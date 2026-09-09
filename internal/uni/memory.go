@@ -85,15 +85,14 @@ func AnalysisMemoryLimit(total, available int64) int64 {
 	if total <= 0 {
 		return 0
 	}
-	// Android.bp analysis has non-Go memory and is followed by Kati. Leaving a
-	// physical reserve is faster than letting the Go heap reclaim through swap.
+	// Leave enough RAM for non-Go mappings and Kati without forcing the Go heap
+	// into constant collection on machines where analysis already fits.
 	reserve := max(4*gibibyte, total/4)
 	limit := total - reserve
-	if available > 0 {
-		// The Go limit excludes mapped files and can be exceeded by live heap.
-		// Reserve headroom from currently available RAM, not only total RAM.
-		headroom := max(4*gibibyte, available/4)
-		limit = min(limit, max(available/2, available-headroom))
+	if available > 3*gibibyte {
+		limit = min(limit, max(available/2, available-3*gibibyte))
+	} else if available > 0 {
+		limit = available / 2
 	}
 	if limit > 0 {
 		return limit
