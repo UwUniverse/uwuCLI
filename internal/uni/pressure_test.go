@@ -79,17 +79,33 @@ func TestPressureGuardAllowsHealthyParallelism(t *testing.T) {
 	}
 }
 
-func TestPressureGuardStopsExtremePSIWithFreeMemory(t *testing.T) {
+func TestPressureGuardAllowsExtremePSIWithFreeMemory(t *testing.T) {
 	start := time.Unix(100, 0)
-	memory := MemorySnapshot{Total: 32 * gibibyte, Available: 14 * gibibyte}
+	memory := MemorySnapshot{Total: 32577765376, Available: 17234452480}
 	var guard memoryPressureGuard
-	for i := 0; i < 3; i++ {
-		if guard.observe(start.Add(time.Duration(i)*2*time.Second), memory, memoryEmergencyPSI) {
-			t.Fatal("transient extreme pressure stopped the build")
+	for i := 0; i < 30; i++ {
+		if guard.observe(start.Add(time.Duration(i)*2*time.Second), memory, 65.60) {
+			t.Fatal("PSI alone stopped the build despite available memory")
 		}
 	}
-	if !guard.observe(start.Add(6*time.Second), memory, memoryEmergencyPSI) {
-		t.Fatal("extreme PSI did not stop the build before oomd")
+	memory.Available = 2 * gibibyte
+	if guard.observe(start.Add(time.Minute), memory, 65.60) {
+		t.Fatal("high-PSI samples with free memory started the low-memory timer")
+	}
+	if !guard.observe(start.Add(time.Minute+6*time.Second), memory, 65.60) {
+		t.Fatal("sustained low memory no longer stops the build")
+	}
+}
+
+func TestPressureGuardStopsMemoryExhaustionWithoutPSI(t *testing.T) {
+	start := time.Unix(100, 0)
+	memory := MemorySnapshot{Total: 32 * gibibyte, Available: gibibyte / 4}
+	var guard memoryPressureGuard
+	if guard.observe(start, memory, 0) {
+		t.Fatal("single observation stopped the build")
+	}
+	if !guard.observe(start.Add(6*time.Second), memory, 0) {
+		t.Fatal("memory exhaustion without PSI did not stop the build")
 	}
 }
 

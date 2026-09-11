@@ -5,6 +5,7 @@ package uni
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -23,6 +24,29 @@ type poolDecision struct {
 }
 
 type poolAdmission struct{}
+
+func (decision poolDecision) forMemoryRetry(retries int) poolDecision {
+	if retries <= 0 {
+		return decision
+	}
+	numerator, denominator := 2, 3
+	if retries >= 2 {
+		numerator, denominator = 1, 2
+	}
+	scale := func(value int, explicit bool) int {
+		if explicit {
+			return value
+		}
+		return max(1, value*numerator/denominator)
+	}
+	decision.highmem = scale(decision.highmem, decision.highmemExplicit)
+	decision.r8 = scale(decision.r8, decision.r8Explicit)
+	decision.rust = scale(decision.rust, decision.rustExplicit)
+	decision.java = scale(decision.java, decision.javaExplicit)
+	decision.kotlin = scale(decision.kotlin, decision.kotlinExplicit)
+	decision.reason += "; memory-retry=" + strconv.Itoa(retries)
+	return decision
+}
 
 func (admission *poolAdmission) decide(maxJobs int, snapshot MemorySnapshot, environment []string, rustCodegenUnits int) poolDecision {
 	limit := MaximumJobs(maxJobs)

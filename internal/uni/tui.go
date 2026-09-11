@@ -49,6 +49,7 @@ type compactTask struct {
 	percent  int
 	done     int
 	total    int
+	activity string
 	latest   string
 	logs     compactRing
 }
@@ -263,6 +264,7 @@ func (tui *compactTUI) phaseStarted(phase string, jobs int) {
 		task.percent = 0
 		task.done = 0
 		task.total = 0
+		task.activity = ""
 	}
 	task.status = compactTaskRunning
 	task.jobs = jobs
@@ -292,7 +294,29 @@ func (tui *compactTUI) updateTelemetry(sample TelemetrySample) {
 		tui.memory = sample.MemoryAvailable
 	}
 	tui.r8 = sample.R8
+	if tui.active != nil && tui.active.status == compactTaskRunning {
+		tui.active.activity = compactActivity(sample)
+	}
 	tui.dirty = true
+}
+
+func compactActivity(sample TelemetrySample) string {
+	switch {
+	case sample.R8 > 0:
+		return fmt.Sprintf("R8=%d", sample.R8)
+	case sample.Linker > 0:
+		return fmt.Sprintf("link=%d", sample.Linker)
+	case sample.Kotlinc > 0:
+		return fmt.Sprintf("Kotlin=%d", sample.Kotlinc)
+	case sample.Javac > 0:
+		return fmt.Sprintf("Java=%d", sample.Javac)
+	case sample.Rustc > 0:
+		return fmt.Sprintf("Rust=%d", sample.Rustc)
+	case sample.Clang > 0:
+		return fmt.Sprintf("C/C++=%d", sample.Clang)
+	default:
+		return ""
+	}
 }
 
 func (tui *compactTUI) consume(line string) {
@@ -334,6 +358,7 @@ func (tui *compactTUI) consume(line string) {
 	}
 	if displayLine != "" {
 		target.latest = displayLine
+		target.activity = ""
 	}
 	target.logs.add(line)
 	if percent, done, total, ok := parseCompactProgress(line); ok {
@@ -555,6 +580,9 @@ func (tui *compactTUI) taskLine(task *compactTask) string {
 	case compactTaskRunning:
 		spinner := string(compactTUISpinner[tui.spinner%len(compactTUISpinner)])
 		line := fmt.Sprintf("%s %s %s  %s  %s=%d", prefix, spinner, tui.messages.building, compactDuration(duration), tui.messages.jobs, task.jobs)
+		if task.activity != "" {
+			line += "  " + task.activity
+		}
 		if task.total > 0 {
 			line += fmt.Sprintf("  %d%% %d/%d", task.percent, task.done, task.total)
 		}

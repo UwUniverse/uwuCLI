@@ -94,18 +94,44 @@ func TestCompactTUITracksPhaseProgressAndTelemetry(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
 	tui.phaseStarted("startup", 9)
 	tui.consume("[ 79% 15175/19054] //module:target r8 [common]")
-	tui.updateTelemetry(TelemetrySample{MemoryAvailable: 13 * gibibyte, R8: 3})
+	tui.updateTelemetry(TelemetrySample{MemoryAvailable: 13 * gibibyte, Linker: 1})
 
 	task := tui.byName["Startup"]
 	if task.status != compactTaskRunning || task.jobs != 9 || task.percent != 79 || task.done != 15175 || task.total != 19054 {
 		t.Fatalf("unexpected task: %+v", *task)
 	}
-	if tui.r8 != 3 || tui.memory != 13*gibibyte {
+	if tui.r8 != 0 || tui.memory != 13*gibibyte {
 		t.Fatalf("unexpected telemetry: r8=%d memory=%d", tui.r8, tui.memory)
+	}
+	if task.activity != "link=1" || !strings.Contains(tui.taskLine(task), "link=1") {
+		t.Fatalf("active linker is not visible: task=%+v line=%q", *task, tui.taskLine(task))
 	}
 	tui.phaseFinished("startup", nil)
 	if task.status != compactTaskDone {
 		t.Fatalf("task status=%v, want done", task.status)
+	}
+}
+
+func TestCompactActivityUsesCurrentCompilerClass(t *testing.T) {
+	tests := []struct {
+		name   string
+		sample TelemetrySample
+		want   string
+	}{
+		{name: "r8", sample: TelemetrySample{R8: 2, Linker: 1}, want: "R8=2"},
+		{name: "linker", sample: TelemetrySample{Linker: 1, Clang: 8}, want: "link=1"},
+		{name: "kotlin", sample: TelemetrySample{Kotlinc: 3}, want: "Kotlin=3"},
+		{name: "java", sample: TelemetrySample{Javac: 7}, want: "Java=7"},
+		{name: "rust", sample: TelemetrySample{Rustc: 10}, want: "Rust=10"},
+		{name: "clang", sample: TelemetrySample{Clang: 12}, want: "C/C++=12"},
+		{name: "idle", sample: TelemetrySample{}, want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := compactActivity(test.sample); got != test.want {
+				t.Fatalf("activity=%q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

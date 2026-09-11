@@ -3,7 +3,12 @@
 
 package uni
 
-import "testing"
+import (
+	"os"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 func TestClassifyBuildProcess(t *testing.T) {
 	tests := map[string]string{
@@ -32,4 +37,29 @@ func TestClassifyBuildProcessDoesNotCountShellWrappers(t *testing.T) {
 			t.Fatalf("classify wrapper %q = %q, want other", command, got)
 		}
 	}
+}
+
+func TestMemoryMonitorUpdatesLiveSinkWithoutIncreasingReportFrequency(t *testing.T) {
+	root, err := readProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reports atomic.Int32
+	var liveUpdates atomic.Int32
+	monitor := startMemoryMonitor(root, t.TempDir(),
+		func(TelemetrySample) { reports.Add(1) },
+		func(TelemetrySample) { liveUpdates.Add(1) })
+
+	monitor.mu.Lock()
+	monitor.lastReported = time.Now()
+	monitor.mu.Unlock()
+	monitor.record(false)
+
+	if got := reports.Load(); got != 1 {
+		t.Fatalf("report updates=%d, want 1", got)
+	}
+	if got := liveUpdates.Load(); got != 2 {
+		t.Fatalf("live updates=%d, want 2", got)
+	}
+	monitor.finish()
 }

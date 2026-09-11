@@ -14,7 +14,6 @@ import (
 var errMemoryPressure = errors.New("sustained memory pressure: build stopped and recovery state saved")
 
 const (
-	memoryEmergencyPSI         = 45.0
 	memoryRecoveryPSI          = 10.0
 	memoryRecoverySamples      = 3
 	memoryRecoveryPollInterval = time.Second
@@ -39,9 +38,6 @@ func (guard *memoryPressureGuard) observe(now time.Time, memory MemorySnapshot, 
 	}
 	reserve := max(3*gibibyte, memory.Total/8)
 	pressured := memory.Available < reserve && fullAvg10 >= 20
-	if fullAvg10 >= memoryEmergencyPSI {
-		pressured = true
-	}
 	if memory.Available >= 0 && memory.Available < gibibyte/2 {
 		pressured = true
 	}

@@ -79,6 +79,18 @@ func TestPhasedNinjaExecutor(t *testing.T) {
 	}
 }
 
+func TestPreferLocalNinjaOnMemoryConstrainedHost(t *testing.T) {
+	if !preferLocalNinja("", MemorySnapshot{Total: 32 * gibibyte}) {
+		t.Fatal("default executor should use local Ninja on a 32 GiB host")
+	}
+	if preferLocalNinja("siso", MemorySnapshot{Total: 32 * gibibyte}) {
+		t.Fatal("explicit Siso selection must be preserved")
+	}
+	if preferLocalNinja("", MemorySnapshot{Total: 64 * gibibyte}) {
+		t.Fatal("default executor should remain available on a 64 GiB host")
+	}
+}
+
 func TestExecutorLabel(t *testing.T) {
 	if actual := executorLabel(""); actual != "default" {
 		t.Fatalf("empty executor label = %q", actual)

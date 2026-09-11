@@ -57,3 +57,23 @@ func TestPoolAdmissionPreservesExplicitOverrides(t *testing.T) {
 		t.Fatalf("explicit pools were changed: %+v", decision)
 	}
 }
+
+func TestPoolAdmissionBacksOffAllAutomaticPoolsOnMemoryRetry(t *testing.T) {
+	decision := poolDecision{highmem: 5, r8: 4, rust: 5, java: 11, kotlin: 4}
+	first := decision.forMemoryRetry(1)
+	if first.highmem != 3 || first.r8 != 2 || first.rust != 3 || first.java != 7 || first.kotlin != 2 {
+		t.Fatalf("first retry pools = %+v, want 3/2/3/7/2", first)
+	}
+	second := decision.forMemoryRetry(2)
+	if second.highmem != 2 || second.r8 != 2 || second.rust != 2 || second.java != 5 || second.kotlin != 2 {
+		t.Fatalf("second retry pools = %+v, want 2/2/2/5/2", second)
+	}
+}
+
+func TestPoolAdmissionKeepsExplicitPoolOnMemoryRetry(t *testing.T) {
+	decision := poolDecision{highmem: 5, java: 11, highmemExplicit: true}
+	retried := decision.forMemoryRetry(1)
+	if retried.highmem != 5 || retried.java != 7 {
+		t.Fatalf("retry changed explicit pool or failed to scale automatic pool: %+v", retried)
+	}
+}

@@ -417,7 +417,9 @@ func Run(ctx context.Context, options Options) error {
 		report.ccache("start", runner.baseEnv)
 		defer report.ccache("finish", runner.baseEnv)
 	}
-	runner.forceLocalNinja = options.FullBuild
+	snapshot := memorySnapshotOrWarning(report, "initial-memory")
+	autoLocalNinja := preferLocalNinja(runner.requestedNinja, snapshot)
+	runner.forceLocalNinja = options.FullBuild || autoLocalNinja
 	if options.FullBuild {
 		runner.kernelJobs = nestedKernelJobs(options.MaxJobs)
 	}
@@ -453,12 +455,11 @@ func Run(ctx context.Context, options Options) error {
 	if runner.forceLocalNinja {
 		singleExecutor = runner.phasedNinja
 	}
-	report.event("executor requested=%s single=%s segmented=%s",
-		executorLabel(runner.requestedNinja), singleExecutor, runner.phasedNinja)
+	report.event("executor requested=%s single=%s segmented=%s auto_memory=%t",
+		executorLabel(runner.requestedNinja), singleExecutor, runner.phasedNinja, autoLocalNinja)
 	if runner.kernelJobs > 0 {
 		report.event("kernel nested_jobs=%d global_jobs=%d", runner.kernelJobs, MaximumJobs(options.MaxJobs))
 	}
-	snapshot := memorySnapshotOrWarning(report, "initial-memory")
 	jobs := MaximumJobs(options.MaxJobs)
 	batchSize := options.BatchSize
 

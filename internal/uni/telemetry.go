@@ -103,6 +103,7 @@ type memoryMonitor struct {
 	root         processIdentity
 	outDir       string
 	sink         func(TelemetrySample)
+	liveSink     func(TelemetrySample)
 	started      time.Time
 	lastReported time.Time
 
@@ -138,11 +139,12 @@ type memoryMonitor struct {
 	warningSet     map[string]struct{}
 }
 
-func startMemoryMonitor(root processIdentity, outDir string, sink func(TelemetrySample)) *memoryMonitor {
+func startMemoryMonitor(root processIdentity, outDir string, sink, liveSink func(TelemetrySample)) *memoryMonitor {
 	monitor := &memoryMonitor{
 		root:        root,
 		outDir:      outDir,
 		sink:        sink,
+		liveSink:    liveSink,
 		started:     time.Now(),
 		stop:        make(chan struct{}),
 		done:        make(chan struct{}),
@@ -491,17 +493,16 @@ func (monitor *memoryMonitor) record(forceReport bool) {
 	for taskType, count := range counts {
 		monitor.maxCounts[taskType] = max(monitor.maxCounts[taskType], count)
 	}
-	var reportSample TelemetrySample
+	reportSample := TelemetrySample{
+		Timestamp: point.at, Elapsed: point.at.Sub(monitor.started), RootPID: monitor.root.PID,
+		CPUPercent: cpuPercent, IOWaitPercent: ioWaitPercent, Load: point.load,
+		MemoryPSI: point.psi, CPUPSI: point.cpuPSI, IOPSI: point.ioPSI,
+		Processes: len(point.processes), TrackedRSS: trackedRSS,
+		R8: counts["r8"], Linker: counts["linker"], Javac: counts["javac"],
+		Kotlinc: counts["kotlinc"], Rustc: counts["rustc"], Clang: counts["clang"],
+		CPUFreqMinKHz: point.cpuFreqMin, CPUFreqAvgKHz: point.cpuFreqAvg, CPUFreqMaxKHz: point.cpuFreqMax,
+	}
 	if shouldReport {
-		reportSample = TelemetrySample{
-			Timestamp: point.at, Elapsed: point.at.Sub(monitor.started), RootPID: monitor.root.PID,
-			CPUPercent: cpuPercent, IOWaitPercent: ioWaitPercent, Load: point.load,
-			MemoryPSI: point.psi, CPUPSI: point.cpuPSI, IOPSI: point.ioPSI,
-			Processes: len(point.processes), TrackedRSS: trackedRSS,
-			R8: counts["r8"], Linker: counts["linker"], Javac: counts["javac"],
-			Kotlinc: counts["kotlinc"], Rustc: counts["rustc"], Clang: counts["clang"],
-			CPUFreqMinKHz: point.cpuFreqMin, CPUFreqAvgKHz: point.cpuFreqAvg, CPUFreqMaxKHz: point.cpuFreqMax,
-		}
 		if point.memoryOK {
 			reportSample.MemoryAvailable = point.memory.Available
 			reportSample.SwapFree = point.memory.SwapFree
@@ -518,6 +519,9 @@ func (monitor *memoryMonitor) record(forceReport bool) {
 	monitor.previous = point
 	monitor.havePrevious = true
 	monitor.mu.Unlock()
+	if monitor.liveSink != nil {
+		monitor.liveSink(reportSample)
+	}
 	if shouldReport && monitor.sink != nil {
 		monitor.sink(reportSample)
 	}
