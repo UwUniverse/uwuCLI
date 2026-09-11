@@ -43,7 +43,6 @@ type commandRunner struct {
 	admission               poolAdmission
 	forceLocalNinja         bool
 	kernelJobs              int
-	memoryRetries           int
 }
 
 func phasedNinjaExecutor(requested string) string {
@@ -51,6 +50,10 @@ func phasedNinjaExecutor(requested string) string {
 		return "ninja"
 	}
 	return requested
+}
+
+func preferLocalNinja(requested string, snapshot MemorySnapshot) bool {
+	return strings.TrimSpace(requested) == "" && snapshot.Total > 0 && snapshot.Total < 48*gibibyte
 }
 
 func executorLabel(executor string) string {
@@ -124,6 +127,20 @@ func environmentTrue(environment []string, name string) bool {
 	return false
 }
 
+func rustCodegenUnitsForPool(environment []string) int {
+	if value, set := positiveEnvironmentInt(environment, "SOONG_RUSTC_CODEGEN_UNITS"); set {
+		return value
+	}
+	// Match transformSrctoCrate when Soong does not override rustc's defaults.
+	if environmentTrue(environment, "SOONG_RUSTC_INCREMENTAL") {
+		return 256
+	}
+	if variant, _ := environmentValue(environment, "TARGET_BUILD_VARIANT"); variant == "eng" {
+		return 16
+	}
+	return 1
+}
+
 func newCommandRunner(ctx context.Context, top string, keyValues []string) (*commandRunner, error) {
 	runner := &commandRunner{
 		top:            top,
@@ -145,14 +162,11 @@ func newCommandRunner(ctx context.Context, top string, keyValues []string) (*com
 	if _, set := environmentValue(runner.baseEnv, "SOONG_KOTLIN_DAEMON"); !set {
 		runner.baseEnv = overrideEnvironment(runner.baseEnv, "SOONG_KOTLIN_DAEMON=true")
 	}
-	if _, set := environmentValue(runner.baseEnv, "SOONG_RUSTC_CODEGEN_UNITS"); !set {
-		runner.baseEnv = overrideEnvironment(runner.baseEnv, "SOONG_RUSTC_CODEGEN_UNITS=4")
-	}
 	if _, set := environmentValue(runner.baseEnv, "SOONG_INCREMENTAL_ANALYSIS"); !set {
 		runner.baseEnv = overrideEnvironment(runner.baseEnv, "SOONG_INCREMENTAL_ANALYSIS=true")
 	}
 	runner.rustIncremental = environmentTrue(runner.baseEnv, "SOONG_RUSTC_INCREMENTAL")
-	runner.rustCodegenUnits, _ = positiveEnvironmentInt(runner.baseEnv, "SOONG_RUSTC_CODEGEN_UNITS")
+	runner.rustCodegenUnits = rustCodegenUnitsForPool(runner.baseEnv)
 	runner.partialCompile = environmentTrue(runner.baseEnv, "SOONG_USE_PARTIAL_COMPILE")
 	runner.kotlinDaemon = environmentTrue(runner.baseEnv, "SOONG_KOTLIN_DAEMON")
 	runner.incrementalAnalysis = environmentTrue(runner.baseEnv, "SOONG_INCREMENTAL_ANALYSIS")
@@ -182,6 +196,10 @@ func newCommandRunner(ctx context.Context, top string, keyValues []string) (*com
 }
 
 func (runner *commandRunner) runReported(ctx context.Context, report *debugReport, summary *buildSummary, name, mode, phase, statePath string, args []string, maxJobs int) (SegmentSample, error) {
+	return runner.runReportedAttempt(ctx, report, summary, name, mode, phase, statePath, args, maxJobs, 0)
+}
+
+func (runner *commandRunner) runReportedAttempt(ctx context.Context, report *debugReport, summary *buildSummary, name, mode, phase, statePath string, args []string, maxJobs, memoryRetries int) (SegmentSample, error) {
 	tui := compactTUIFromContext(ctx)
 	if tui != nil {
 		tui.phaseStarted(name, maxJobs)
@@ -191,18 +209,16 @@ func (runner *commandRunner) runReported(ctx context.Context, report *debugRepor
 		report.event("command_start phase=%s mode=%s ninja_phase=%s jobs=%d arguments=%s", name, mode, phase, maxJobs, quoteArguments(args))
 	}
 	started := time.Now()
-	var telemetrySink func(TelemetrySample)
-	if report != nil || tui != nil {
+	var telemetrySink, liveTelemetrySink func(TelemetrySample)
+	if report != nil {
 		telemetrySink = func(sample TelemetrySample) {
-			if report != nil {
-				report.telemetry(name, sample)
-			}
-			if tui != nil {
-				tui.updateTelemetry(sample)
-			}
+			report.telemetry(name, sample)
 		}
 	}
-	sample, err := runner.runWithTelemetry(ctx, mode, phase, statePath, args, maxJobs, telemetrySink)
+	if tui != nil {
+		liveTelemetrySink = tui.updateTelemetry
+	}
+	sample, err := runner.runWithTelemetry(ctx, mode, phase, statePath, args, maxJobs, memoryRetries, telemetrySink, liveTelemetrySink)
 	sample.Phase = name
 	sample.Duration = time.Since(started)
 	summary.add(sample)
@@ -217,15 +233,15 @@ func (runner *commandRunner) runReported(ctx context.Context, report *debugRepor
 	if tui != nil {
 		tui.phaseFinished(name, err)
 	}
-	if jobs, retry := memoryRetryJobs(err, ctx.Err(), maxJobs, runner.memoryRetries); retry {
-		runner.memoryRetries++
-		fmt.Printf("uni: sustained memory pressure; waiting before -j%d retry %d/2\n", jobs, runner.memoryRetries)
+	if jobs, retry := memoryRetryJobs(err, ctx.Err(), maxJobs, memoryRetries); retry {
+		nextRetry := memoryRetries + 1
+		fmt.Printf("uni: sustained memory pressure; waiting before -j%d retry %d/2\n", jobs, nextRetry)
 		if report != nil {
-			report.event("memory_recovery_wait retry=%d jobs=%d timeout=%s", runner.memoryRetries, jobs, memoryRecoveryTimeout)
+			report.event("memory_recovery_wait retry=%d jobs=%d timeout=%s", nextRetry, jobs, memoryRecoveryTimeout)
 		}
 		waited, recovered := waitForMemoryRecovery(ctx, memoryRecoveryTimeout)
 		if report != nil {
-			report.event("memory_recovery_wait_end retry=%d jobs=%d elapsed=%s recovered=%t", runner.memoryRetries, jobs, waited.Round(time.Millisecond), recovered)
+			report.event("memory_recovery_wait_end retry=%d jobs=%d elapsed=%s recovered=%t", nextRetry, jobs, waited.Round(time.Millisecond), recovered)
 		}
 		if !recovered {
 			if ctx.Err() != nil {
@@ -234,8 +250,8 @@ func (runner *commandRunner) runReported(ctx context.Context, report *debugRepor
 			return sample, fmt.Errorf("%w: pressure remained high for %s", errMemoryPressure, waited.Round(time.Second))
 		}
 		fmt.Printf("uni: memory pressure recovered after %s; resuming completed outputs\n", waited.Round(time.Second))
-		return runner.runReported(ctx, report, summary, name, mode, phase, statePath,
-			replaceParallelArgs(args, jobs), jobs)
+		return runner.runReportedAttempt(ctx, report, summary, name, mode, phase, statePath,
+			replaceParallelArgs(args, jobs), jobs, nextRetry)
 	}
 	return sample, err
 }
@@ -254,10 +270,10 @@ func (runner *commandRunner) probeCgroup(ctx context.Context) bool {
 }
 
 func (runner *commandRunner) run(ctx context.Context, mode, phase, statePath string, args []string, maxJobs int) (SegmentSample, error) {
-	return runner.runWithTelemetry(ctx, mode, phase, statePath, args, maxJobs, nil)
+	return runner.runWithTelemetry(ctx, mode, phase, statePath, args, maxJobs, 0, nil, nil)
 }
 
-func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, statePath string, args []string, maxJobs int, telemetrySink func(TelemetrySample)) (SegmentSample, error) {
+func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, statePath string, args []string, maxJobs, memoryRetries int, telemetrySink, liveTelemetrySink func(TelemetrySample)) (SegmentSample, error) {
 	snapshot, err := ReadMemorySnapshot()
 	var telemetryWarnings []string
 	if err != nil {
@@ -354,6 +370,7 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 		overrides = append(overrides, "CCACHE_FILECLONE=true")
 	}
 	pools := runner.admission.decide(maxJobs, snapshot, runner.baseEnv, runner.rustCodegenUnits)
+	pools = pools.forMemoryRetry(memoryRetries)
 	highmemJobs, r8Jobs, rustJobs := pools.highmem, pools.r8, pools.rust
 	javaJobs, kotlinJobs := pools.java, pools.kotlin
 	if !pools.highmemExplicit {
@@ -411,7 +428,7 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 		}
 		return SegmentSample{}, fmt.Errorf("record active build: %w", leaseErr)
 	}
-	monitor := startMemoryMonitor(rootIdentity, runner.outDir, telemetrySink)
+	monitor := startMemoryMonitor(rootIdentity, runner.outDir, telemetrySink, liveTelemetrySink)
 	done := make(chan struct{})
 	cancelFinished := make(chan struct{})
 	pressureTriggered := false

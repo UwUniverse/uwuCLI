@@ -85,12 +85,13 @@ func AnalysisMemoryLimit(total, available int64) int64 {
 	if total <= 0 {
 		return 0
 	}
-	// Leave enough RAM for non-Go mappings and Kati without forcing the Go heap
-	// into constant collection on machines where analysis already fits.
+	// Soong's RSS can exceed its managed Go heap by several GiB. Keep that
+	// overhead resident so analysis does not turn into swap-bound I/O.
 	reserve := max(4*gibibyte, total/4)
 	limit := total - reserve
-	if available > 3*gibibyte {
-		limit = min(limit, max(available/2, available-3*gibibyte))
+	processHeadroom := min(6*gibibyte, max(4*gibibyte, total/5))
+	if available > processHeadroom {
+		limit = min(limit, max(available/2, available-processHeadroom))
 	} else if available > 0 {
 		limit = available / 2
 	}
