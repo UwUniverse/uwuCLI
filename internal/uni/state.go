@@ -157,6 +157,7 @@ func sourceGraphFile(relative, name string) bool {
 		return true
 	}
 	return strings.HasPrefix(relative, "build/soong/") ||
+		strings.HasPrefix(relative, "vendor/uwu/build/soong/") ||
 		strings.HasPrefix(relative, "build/blueprint/")
 }
 
