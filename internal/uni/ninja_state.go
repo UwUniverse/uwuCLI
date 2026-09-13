@@ -409,12 +409,7 @@ func recoverNinjaDeps(outDir string) error {
 		}
 		return cloneOrCopyFileAtomic(currentPath, backupPath)
 	}
-	backupInfo, err := os.Stat(backupPath)
-	if err != nil {
-		return err
-	}
-	currentInfo, currentStatErr := os.Stat(currentPath)
-	if !currentValid || currentStatErr != nil || currentInfo.Size() < backupInfo.Size() {
+	if !currentValid {
 		return cloneOrCopyFileAtomic(backupPath, currentPath)
 	}
 	return nil
