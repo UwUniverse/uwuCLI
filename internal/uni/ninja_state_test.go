@@ -135,7 +135,7 @@ func TestPrepareNinjaStateSurvivesGraphLogReset(t *testing.T) {
 	}
 }
 
-func TestRecoverNinjaDepsRestoresLargerValidBackup(t *testing.T) {
+func TestRecoverNinjaDepsKeepsSmallerValidCurrentFile(t *testing.T) {
 	outDir := t.TempDir()
 	backupPath := filepath.Join(ninjaRecoveryDirectory(outDir), ".ninja_deps")
 	if err := os.MkdirAll(filepath.Dir(backupPath), 0755); err != nil {
@@ -156,8 +156,34 @@ func TestRecoverNinjaDepsRestoresLargerValidBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if string(recovered) != string(current) {
+		t.Fatal("valid compacted Ninja deps file was replaced with an older backup")
+	}
+}
+
+func TestRecoverNinjaDepsRestoresInvalidCurrentFile(t *testing.T) {
+	outDir := t.TempDir()
+	backupPath := filepath.Join(ninjaRecoveryDirectory(outDir), ".ninja_deps")
+	if err := os.MkdirAll(filepath.Dir(backupPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	backup := testNinjaDeps("valid")
+	if err := os.WriteFile(backupPath, backup, 0644); err != nil {
+		t.Fatal(err)
+	}
+	currentPath := filepath.Join(outDir, ".ninja_deps")
+	if err := os.WriteFile(currentPath, []byte("truncated"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverNinjaDeps(outDir); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := os.ReadFile(currentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if string(recovered) != string(backup) {
-		t.Fatal("Ninja deps backup was not restored")
+		t.Fatal("invalid Ninja deps file was not restored from backup")
 	}
 }
 
