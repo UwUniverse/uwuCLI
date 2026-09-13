@@ -440,11 +440,11 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 		for {
 			select {
 			case <-ctx.Done():
-				terminateBuildProcessTree(rootIdentity, scopeUnit, runner.outDir)
+				interruptBuildProcessTree(rootIdentity, scopeUnit, runner.outDir)
 				return
 			case <-done:
 				if ctx.Err() != nil {
-					terminateBuildProcessTree(rootIdentity, scopeUnit, runner.outDir)
+					interruptBuildProcessTree(rootIdentity, scopeUnit, runner.outDir)
 				}
 				return
 			case now := <-ticker.C:
@@ -539,7 +539,7 @@ func terminateProcessIdentityTree(root processIdentity, scopeUnit string) {
 		runSystemctl("stop", "--no-block", scopeUnit)
 	}
 	exited := waitForProcessTreeExit(root.PID, processes, 2*time.Second)
-	if exited && scopeUnit == "" {
+	if exited {
 		return
 	}
 	processes = mergeProcessIdentities(processes, snapshotProcessTreeForRoot(root))
@@ -575,6 +575,17 @@ func terminateBuildProcessTree(root processIdentity, scopeUnit, outDir string) {
 	if len(processes) == 0 {
 		return
 	}
+	signalProcessIdentities(processes, syscall.SIGKILL)
+	waitForProcessIdentitiesExit(processes, 2*time.Second)
+}
+
+func interruptBuildProcessTree(root processIdentity, scopeUnit, outDir string) {
+	processes := signalProcessTreeIdentity(root, syscall.SIGINT)
+	if waitForProcessTreeExit(root.PID, processes, 750*time.Millisecond) &&
+		len(runningUniProcesses(outDir)) == 0 {
+		return
+	}
+	terminateBuildProcessTree(root, scopeUnit, outDir)
 	signalProcessIdentities(processes, syscall.SIGKILL)
 	waitForProcessIdentitiesExit(processes, 2*time.Second)
 }
