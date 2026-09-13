@@ -448,9 +448,9 @@ func Run(ctx context.Context, options Options) error {
 	if err := prepareNinjaState(outDir, options.TrustOutput); err != nil {
 		return fmt.Errorf("prepare Ninja recovery state: %w", err)
 	}
-	report.event("resources cgroup=%t ccache=%t compiler_check_auto=%t fileclone_auto=%t",
+	report.event("resources cgroup=%t ccache=%t compiler_check_auto=%t fileclone_auto=%t ccache_max_size_auto=%q",
 		runner.useCgroup, runner.useCcache,
-		runner.autoCcacheCompilerCheck, runner.autoCcacheFileClone)
+		runner.autoCcacheCompilerCheck, runner.autoCcacheFileClone, runner.autoCcacheMaxSize)
 	singleExecutor := executorLabel(runner.requestedNinja)
 	if runner.forceLocalNinja {
 		singleExecutor = runner.phasedNinja

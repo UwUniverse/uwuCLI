@@ -24,6 +24,7 @@ type commandRunner struct {
 	useCcache               bool
 	autoCcacheCompilerCheck bool
 	autoCcacheFileClone     bool
+	autoCcacheMaxSize       string
 	requestedNinja          string
 	phasedNinja             string
 	scopePrefix             string
@@ -188,6 +189,14 @@ func newCommandRunner(ctx context.Context, top string, keyValues []string) (*com
 	runner.autoCcacheCompilerCheck = runner.useCcache && !runnerCompilerCheckSet
 	_, runnerFileCloneSet := environmentValue(runner.baseEnv, "CCACHE_FILECLONE")
 	runner.autoCcacheFileClone = runner.useCcache && !runnerFileCloneSet && canAutoEnableFileClone(top, outDir)
+	_, runnerMaxSizeSet := environmentValue(runner.baseEnv, "CCACHE_MAXSIZE")
+	if runner.useCcache && !runnerMaxSizeSet {
+		runner.autoCcacheMaxSize = automaticCcacheMaxSize(outDir, runner.baseEnv)
+		if runner.autoCcacheMaxSize != "" {
+			runner.baseEnv = overrideEnvironment(runner.baseEnv,
+				"CCACHE_MAXSIZE="+runner.autoCcacheMaxSize)
+		}
+	}
 	if _, err := os.Stat(runner.soongUIPath); err != nil {
 		return nil, err
 	}
@@ -615,4 +624,37 @@ func canAutoEnableFileClone(top, outDir string) bool {
 	}
 	free := int64(fileSystem.Bavail) * int64(fileSystem.Bsize)
 	return free >= 32*gibibyte
+}
+
+func ccacheMaxSizeForDisk(currentSize, configuredMax, diskFree int64) int64 {
+	const (
+		maximum = 32 * gibibyte
+		reserve = 40 * gibibyte
+	)
+	if configuredMax >= maximum {
+		return 0
+	}
+	growth := max(int64(0), maximum-currentSize)
+	if diskFree-growth < reserve {
+		return 0
+	}
+	return maximum
+}
+
+func automaticCcacheMaxSize(outDir string, environment []string) string {
+	stats, err := readCcacheStats(environment)
+	if err != nil {
+		return ""
+	}
+	diskFree, err := readDiskAvailable(outDir)
+	if err != nil {
+		return ""
+	}
+	currentSize := int64(stats["cache_size_kibibyte"]) * 1024
+	configuredMax := int64(stats["max_cache_size_kibibyte"]) * 1024
+	target := ccacheMaxSizeForDisk(currentSize, configuredMax, diskFree)
+	if target == 0 {
+		return ""
+	}
+	return strconv.FormatInt(target/gibibyte, 10) + "G"
 }
