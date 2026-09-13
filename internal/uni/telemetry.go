@@ -306,7 +306,9 @@ func classifyBuildProcess(command []byte, fallback string) (string, string) {
 	lowerName := strings.ToLower(name)
 	isJava := lowerName == "java"
 	switch {
-	case isJava && (strings.Contains(joined, "com.android.tools.r8.r8") || strings.Contains(joined, " r8.jar")):
+	case isJava && (strings.Contains(joined, "com.android.tools.r8.r8") ||
+		strings.Contains(joined, "com.android.tools.r8.d8") ||
+		strings.Contains(joined, " r8.jar") || strings.Contains(joined, " d8.jar")):
 		return name, "r8"
 	case strings.Contains(lowerName, "kotlinc") || isJava && (strings.Contains(joined, "kotlinc") || strings.Contains(joined, "kotlin-compiler")):
 		return name, "kotlinc"
