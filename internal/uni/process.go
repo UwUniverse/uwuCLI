@@ -23,6 +23,7 @@ type commandRunner struct {
 	useCgroup               bool
 	useCcache               bool
 	autoCcacheCompilerCheck bool
+	autoCcacheDepend        bool
 	autoCcacheFileClone     bool
 	autoCcacheMaxSize       string
 	requestedNinja          string
@@ -187,6 +188,12 @@ func newCommandRunner(ctx context.Context, top string, keyValues []string) (*com
 	runner.useCcache = useCcache != "" && !strings.EqualFold(useCcache, "false")
 	_, runnerCompilerCheckSet := environmentValue(runner.baseEnv, "CCACHE_COMPILERCHECK")
 	runner.autoCcacheCompilerCheck = runner.useCcache && !runnerCompilerCheckSet
+	_, runnerDependSet := environmentValue(runner.baseEnv, "CCACHE_DEPEND")
+	_, runnerNoDependSet := environmentValue(runner.baseEnv, "CCACHE_NODEPEND")
+	runner.autoCcacheDepend = runner.useCcache && !runnerDependSet && !runnerNoDependSet
+	if runner.autoCcacheDepend {
+		runner.baseEnv = overrideEnvironment(runner.baseEnv, "CCACHE_DEPEND=true")
+	}
 	_, runnerFileCloneSet := environmentValue(runner.baseEnv, "CCACHE_FILECLONE")
 	runner.autoCcacheFileClone = runner.useCcache && !runnerFileCloneSet && canAutoEnableFileClone(top, outDir)
 	_, runnerMaxSizeSet := environmentValue(runner.baseEnv, "CCACHE_MAXSIZE")
@@ -628,7 +635,7 @@ func canAutoEnableFileClone(top, outDir string) bool {
 
 func ccacheMaxSizeForDisk(currentSize, configuredMax, diskFree int64) int64 {
 	const (
-		maximum = 32 * gibibyte
+		maximum = 40 * gibibyte
 		reserve = 40 * gibibyte
 	)
 	if configuredMax >= maximum {

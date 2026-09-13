@@ -60,7 +60,7 @@ func TestCcacheMaxSizeForDisk(t *testing.T) {
 		diskFree      int64
 		want          int64
 	}{
-		{name: "grow warm cache", currentSize: 20 * gibibyte, configuredMax: 20 * gibibyte, diskFree: 60 * gibibyte, want: 32 * gibibyte},
+		{name: "grow warm cache", currentSize: 20 * gibibyte, configuredMax: 20 * gibibyte, diskFree: 72 * gibibyte, want: 40 * gibibyte},
 		{name: "preserve disk reserve", currentSize: 20 * gibibyte, configuredMax: 20 * gibibyte, diskFree: 45 * gibibyte},
 		{name: "keep larger configured limit", currentSize: 20 * gibibyte, configuredMax: 40 * gibibyte, diskFree: 80 * gibibyte},
 		{name: "keep reserve on full disk", currentSize: 20 * gibibyte, configuredMax: 20 * gibibyte, diskFree: 40 * gibibyte},
