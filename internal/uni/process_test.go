@@ -52,6 +52,28 @@ func TestEnvironmentTrue(t *testing.T) {
 	}
 }
 
+func TestCcacheMaxSizeForDisk(t *testing.T) {
+	tests := []struct {
+		name          string
+		currentSize   int64
+		configuredMax int64
+		diskFree      int64
+		want          int64
+	}{
+		{name: "grow warm cache", currentSize: 20 * gibibyte, configuredMax: 20 * gibibyte, diskFree: 60 * gibibyte, want: 32 * gibibyte},
+		{name: "preserve disk reserve", currentSize: 20 * gibibyte, configuredMax: 20 * gibibyte, diskFree: 45 * gibibyte},
+		{name: "keep larger configured limit", currentSize: 20 * gibibyte, configuredMax: 40 * gibibyte, diskFree: 80 * gibibyte},
+		{name: "keep reserve on full disk", currentSize: 20 * gibibyte, configuredMax: 20 * gibibyte, diskFree: 40 * gibibyte},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ccacheMaxSizeForDisk(test.currentSize, test.configuredMax, test.diskFree); got != test.want {
+				t.Fatalf("ccache max size = %s, want %s", formatBytes(got), formatBytes(test.want))
+			}
+		})
+	}
+}
+
 func TestSisoPriorityTargetsAreEncodedForSinglePhase(t *testing.T) {
 	runner := &commandRunner{sisoPriorityTargets: []string{"out/kernel image", "out/r8.jar"}}
 	data, err := json.Marshal(runner.sisoPriorityTargets)
