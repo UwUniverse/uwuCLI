@@ -428,6 +428,21 @@ def module_values(module: Module, key: str, bits: int) -> list[str]:
     return values
 
 
+def module_stem(module: Module, bits: int) -> str | None:
+    stem = module.props.get("stem")
+    target = module.props.get("target")
+    if isinstance(target, dict):
+        arch = target.get("android_arm64" if bits == 64 else "android_arm")
+        if isinstance(arch, dict) and isinstance(arch.get("stem"), str):
+            stem = arch["stem"]
+    arch_props = module.props.get("arch")
+    if isinstance(arch_props, dict):
+        arch = arch_props.get("arm64" if bits == 64 else "arm")
+        if isinstance(arch, dict) and isinstance(arch.get("stem"), str):
+            stem = arch["stem"]
+    return stem if isinstance(stem, str) else None
+
+
 @functools.lru_cache(maxsize=None)
 def read_elf(path: Path, llvm_readobj: Path) -> ElfInfo | None:
     try:
@@ -575,7 +590,7 @@ def output_candidates(
     product_index: dict[str, list[Path]], module: Module, bits: int
 ) -> list[Path]:
     libdir = "lib64" if bits == 64 else "lib"
-    stem = module.props.get("stem")
+    stem = module_stem(module, bits)
     filename = stem if isinstance(stem, str) else module.name
     if module.module_type not in ("cc_binary", "cc_binary_host", "cc_prebuilt_binary"):
         if not filename.endswith(".so"):
@@ -678,7 +693,7 @@ def make_plan(
             if source_entries
             else None
         )
-        stem = dependency_module.props.get("stem") if dependency_module else None
+        stem = module_stem(dependency_module, elf.bits) if dependency_module else None
         filename = stem if isinstance(stem, str) else dependency
         soname = filename if filename.endswith(".so") else filename + ".so"
         source_paths = [path for _, path in prebuilt_entries]
@@ -751,7 +766,7 @@ def make_plan(
 
 def expected_soname(plan: CheckPlan) -> str | None:
     if plan.module.module_type == "cc_prebuilt_library_shared":
-        stem = plan.module.props.get("stem")
+        stem = module_stem(plan.module, plan.elf.bits)
         soname = str(stem or plan.module.name)
         return soname if soname.endswith(".so") else soname + ".so"
     return None
