@@ -556,9 +556,13 @@ func TestReuseStateRejectsNewGlobSource(t *testing.T) {
 	}
 }
 
-func TestForceReuseStatePersistsCurrentSourceFingerprint(t *testing.T) {
+func TestForceReuseStateDoesNotValidateChangedSources(t *testing.T) {
 	directory := t.TempDir()
 	outDir := filepath.Join(directory, "out")
+	sourceDir := filepath.Join(directory, "module", "src")
+	if err := os.MkdirAll(sourceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(outDir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -589,23 +593,30 @@ func TestForceReuseStatePersistsCurrentSourceFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sourceFingerprint, _, err := sourceGraphFingerprint(directory, outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	statePath := filepath.Join(outDir, "state.json")
 	state := State{Version: stateVersion, SourceRoot: directory, OutDir: outDir,
 		TargetProduct: "uwu_test", TargetRelease: "cp2a", BuildVariant: "userdebug",
 		BuildDateTime: "123", BuildDateTimeFile: buildDate, GraphFiles: files,
-		GraphFingerprint: fingerprint, SourceFingerprint: "stale"}
+		GraphFingerprint: fingerprint, SourceFingerprint: sourceFingerprint}
 	if err := SaveState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "NewSource.kt"), []byte("class NewSource\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	reusedState, reused, err := ForceReuseState(statePath, directory, outDir, "uwu_test", "cp2a", "userdebug", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reused || reusedState.SourceFingerprint == "" || reusedState.SourceFingerprint == "stale" {
-		t.Fatalf("current source fingerprint was not persisted: reused=%t fingerprint=%q", reused, reusedState.SourceFingerprint)
+	if !reused || reusedState.SourceFingerprint != sourceFingerprint {
+		t.Fatalf("forced reuse changed the graph source fingerprint: reused=%t fingerprint=%q", reused, reusedState.SourceFingerprint)
 	}
-	if _, reused, err := ReuseState(statePath, directory, outDir, "uwu_test", "cp2a", "userdebug", Options{}); err != nil || !reused {
-		t.Fatalf("forced state was not reusable: reused=%t err=%v", reused, err)
+	if _, reused, err := ReuseState(statePath, directory, outDir, "uwu_test", "cp2a", "userdebug", Options{}); err != nil || reused {
+		t.Fatalf("normal reuse accepted sources bypassed by forced reuse: reused=%t err=%v", reused, err)
 	}
 }
 
