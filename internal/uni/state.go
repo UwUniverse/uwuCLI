@@ -21,6 +21,8 @@ import (
 
 const stateVersion = 7
 
+const sourceFingerprintVersion = 2
+
 const r8CacheVersion = 1
 
 type R8IndexMode int
@@ -163,6 +165,7 @@ func sourceGraphFile(relative, name string) bool {
 
 func sourceGraphFingerprint(sourceRoot, outDir string) (string, int64, error) {
 	hash := sha256.New()
+	fmt.Fprintf(hash, "version\x00%d\n", sourceFingerprintVersion)
 	var newest int64
 	outDir = filepath.Clean(outDir)
 	err := filepath.WalkDir(sourceRoot, func(path string, entry os.DirEntry, walkErr error) error {
@@ -302,7 +305,8 @@ func ReuseState(path, sourceRoot, outDir, product, release, variant string, opti
 }
 
 // ForceReuseState skips freshness checks and refreshes graph metadata so a
-// prepared graph can be recovered after lunch or an interrupted analysis.
+// prepared graph can be recovered after lunch or an interrupted analysis. It
+// retains the source fingerprint from the graph generation that was bypassed.
 func ForceReuseState(path, sourceRoot, outDir, product, release, variant string, options Options) (State, bool, error) {
 	if len(options.KeyValues) != 0 {
 		return State{}, false, fmt.Errorf("--force-reuse cannot be combined with product variable overrides")
@@ -325,10 +329,6 @@ func ForceReuseState(path, sourceRoot, outDir, product, release, variant string,
 	state.NinjaArgs = currentNinjaTargets(options)
 	state.OriginalArgs = append([]string(nil), options.BuildArgs...)
 	state.Dist = options.Dist
-	state.SourceFingerprint, _, err = sourceGraphFingerprint(sourceRoot, outDir)
-	if err != nil {
-		return State{}, false, err
-	}
 	for index := range state.GraphFiles {
 		info, statErr := os.Stat(state.GraphFiles[index].Path)
 		if statErr != nil {
