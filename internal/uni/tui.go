@@ -146,6 +146,7 @@ type compactMessages struct {
 	jobs       string
 	remaining  string
 	running    string
+	idle       string
 	available  string
 	memory     string
 	footer     string
@@ -166,6 +167,7 @@ func compactMessagesForLocale(chinese bool) compactMessages {
 			jobs:       "并发",
 			remaining:  "剩余",
 			running:    "运行中",
+			idle:       "空闲",
 			available:  "可用",
 			memory:     "内存",
 			footer:     "↑↓ 选择   Ctrl+A 详情   Ctrl+P 复制   Ctrl+C 停止",
@@ -184,6 +186,7 @@ func compactMessagesForLocale(chinese bool) compactMessages {
 		jobs:       "jobs",
 		remaining:  "eta",
 		running:    "running",
+		idle:       "idle",
 		available:  "available",
 		memory:     "RAM",
 		footer:     "↑↓ Select   Ctrl+A Details   Ctrl+P Copy   Ctrl+C Stop",
@@ -617,7 +620,11 @@ func (tui *compactTUI) frame(force bool) string {
 		output.WriteString(line)
 		output.WriteByte('\n')
 	}
-	output.WriteString(truncateCompactLine(fmt.Sprintf("  R8        %d %s", tui.r8, tui.messages.running), lineWidth))
+	r8Status := fmt.Sprintf("□ %s", tui.messages.idle)
+	if tui.r8 > 0 {
+		r8Status = fmt.Sprintf("%d %s", tui.r8, tui.messages.running)
+	}
+	output.WriteString(truncateCompactLine(fmt.Sprintf("  R8        %s", r8Status), lineWidth))
 	output.WriteByte('\n')
 	output.WriteString(truncateCompactLine(fmt.Sprintf("  %s %s %s", compactPadRight(tui.messages.memory, 9), compactMemory(tui.memory), tui.messages.available), lineWidth))
 	output.WriteByte('\n')

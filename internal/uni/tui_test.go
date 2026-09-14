@@ -83,6 +83,20 @@ func TestCompactDisplayLinePreservesColorsAndProgress(t *testing.T) {
 	}
 }
 
+func TestCompactTUIR8Status(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	idle := tui.frame(true)
+	if !strings.Contains(idle, "R8        □ idle") || strings.Contains(idle, "0 running") {
+		t.Fatalf("idle R8 status is misleading: %q", idle)
+	}
+
+	tui.updateTelemetry(TelemetrySample{R8: 3})
+	active := tui.frame(true)
+	if !strings.Contains(active, "R8        3 running") {
+		t.Fatalf("active R8 status is missing: %q", active)
+	}
+}
+
 func TestCompactDisplayLineIsBoundedForRedraw(t *testing.T) {
 	line := "\x1b[31m[ 96% 302/312] very-long-module-name-that-would-wrap-on-a-narrow-terminal\x1b[0m"
 	if got := truncateCompactDisplayLine(line, 24); compactTextWidth(sanitizeCompactLine(got)) > 24 {
