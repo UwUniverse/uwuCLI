@@ -92,6 +92,10 @@ print_banner() {
             title="Soong-only readiness"
             description="Find product packages that still depend on Make"
             ;;
+        release)
+            title="Release workspace"
+            description="Check release manifests and migrate local work to a newer baseline"
+            ;;
     esac
     if [[ "$LANGUAGE" == zh ]]; then
         case "${1:-migration}" in
@@ -99,6 +103,7 @@ print_banner() {
             elf) title="ELF 检查"; description="无需运行 Soong 或 Ninja 即可检查已提取的专有 ELF 文件" ;;
             kernel) title="内核迁移"; description="将 legacy BoardConfig 内核配置转换为 uwu_kernel" ;;
             soong-only) title="Soong-only 就绪度"; description="查找仍依赖 Make 的产品 package" ;;
+            release) title="Release workspace"; description="检查版本 manifest，并将本地修改迁移到更新的基线" ;;
             *) title="产品迁移"; description="将 LineageOS 产品设备树转换为 uwuAOSP 设备树" ;;
         esac
     fi
@@ -155,6 +160,7 @@ global_usage() {
   uwu kernel migrate [操作] [选项]         将 legacy 内核配置迁移到 uwu_kernel
   uwu inspect elf [选项]                   检查专有 ELF 文件
   uwu inspect soong-only [选项]            分析阻止产品切换到 Soong-only 的 package
+  uwu release [选项]                      检查版本 manifest 并迁移本地开发修改
 
 命令：
   product migrate lineage
@@ -174,6 +180,10 @@ global_usage() {
   inspect soong-only
       使用已有 Ninja/Kati 产物分析仍依赖 Make 的产品 package。
 
+  release
+      检查本地仓库与版本 manifest 的关系。
+      交互模式会区分本地领先、落后和历史分叉，并可在临时 shell 中执行 git rebase -i。
+
 全局选项：
   --language LANGUAGE        设置语言：en 或 zh
   -h, --help                 显示帮助
@@ -185,6 +195,7 @@ global_usage() {
   uwu kernel migrate plan --device-dir device/oneplus/sm8550-common
   uwu inspect elf --device fajita --jobs 4 --incremental
   uwu inspect soong-only --device astonc
+  uwu release --version 17.0.087 --skip-pull
 EOF
     else
         cat <<'EOF'
@@ -195,6 +206,7 @@ Usage:
   uwu kernel migrate [ACTION] [OPTIONS]    Convert legacy kernel settings to uwu_kernel
   uwu inspect elf [OPTIONS]                Check proprietary ELF files
   uwu inspect soong-only [OPTIONS]         Find packages blocking a Soong-only product
+  uwu release [OPTIONS]                   Check a release manifest and migrate local work
 
 Commands:
   product migrate lineage
@@ -214,6 +226,10 @@ Commands:
   inspect soong-only
       Analyze existing Ninja/Kati outputs for packages that still depend on Make.
 
+  release
+      Check local repositories against a release manifest.
+      Interactive mode distinguishes ahead, behind, and diverged histories and can open a temporary shell for git rebase -i.
+
 Global options:
   --language LANGUAGE        Set the language to en or zh
   -h, --help                 Show this help
@@ -225,6 +241,56 @@ Examples:
   uwu kernel migrate plan --device-dir device/oneplus/sm8550-common
   uwu inspect elf --device fajita --jobs 4 --incremental
   uwu inspect soong-only --device astonc
+  uwu release --version 17.0.087 --skip-pull
+EOF
+    fi
+}
+
+release_usage() {
+    print_banner release
+    if [[ "$LANGUAGE" == zh ]]; then
+        cat <<'EOF'
+uwu release - 检查版本 manifest 并迁移本地开发修改
+
+用法：
+  uwu release [manifest] [选项]
+
+交互模式：
+  发现不匹配时，会询问是否正在开发下一版本。
+  本地领先的仓库会保留；落后或分叉的仓库可以进入临时 shell，
+  直接使用 git rebase -i，退出后再预览并 apply。
+
+选项：
+  --version VERSION         检查指定版本，例如 17.0.087
+  --from-version VERSION    交互式 rebase 使用的源版本，例如 17.0.086
+  -j, --jobs JOBS           并行检查数量，默认 4
+  --skip-pull               不更新版本仓库
+  --no-prompt               禁用交互操作
+  --no-dirty                不检查工作区修改
+  --force-full-check        包含非里程碑版本中的 LineageOS/PixelOS 仓库
+  --language LANGUAGE       设置语言：en 或 zh
+EOF
+    else
+        cat <<'EOF'
+uwu release - Check a release manifest and migrate local work
+
+Usage:
+  uwu release [manifest] [OPTIONS]
+
+Interactive mode:
+  When mismatches are found, the command asks whether this is next-version development.
+  Local-ahead repositories are kept; behind or diverged repositories can enter a temporary
+  shell for native git rebase -i, followed by a preview and explicit apply.
+
+Options:
+  --version VERSION         Check a version, for example 17.0.087
+  --from-version VERSION    Source version for interactive rebases, for example 17.0.086
+  -j, --jobs JOBS           Number of parallel checks, default 4
+  --skip-pull               Do not update the version repository
+  --no-prompt               Disable interactive operations
+  --no-dirty                Do not check worktree modifications
+  --force-full-check        Include LineageOS/PixelOS in non-milestone versions
+  --language LANGUAGE       Set the language to en or zh
 EOF
     fi
 }
@@ -1126,6 +1192,18 @@ vendor_convert_radio_main() {
     vendor_convert_radio "$device_dir"
 }
 
+release_main() {
+    if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
+        release_usage
+        return 0
+    fi
+    local -a args=("$@")
+    if [[ -n "$LANGUAGE" ]]; then
+        args=(--language "$LANGUAGE" "${args[@]}")
+    fi
+    (cd -- "$SOURCE_ROOT" && go -C "$SCRIPT_DIR" run ./cmd/release "${args[@]}")
+}
+
 cleanup() {
     [[ -z "${PRODUCT_TMP:-}" ]] || rm -f -- "$PRODUCT_TMP"
     [[ -z "${ANDROID_PRODUCTS_TMP:-}" ]] || rm -f -- "$ANDROID_PRODUCTS_TMP"
@@ -1257,6 +1335,9 @@ elif [[ $# -ge 3 && "$1" == vendor && "$2" == convert && "$3" == radio ]]; then
 elif [[ $# -ge 2 && "$1" == kernel && "$2" == migrate ]]; then
     shift 2
     kernel_migrate_main "$@"
+elif [[ $# -ge 1 && "$1" == release ]]; then
+    shift
+    release_main "$@"
 elif [[ $# -eq 0 ]]; then
     [[ -n "$LANGUAGE" ]] || choose_language
     if choose_main_action; then
