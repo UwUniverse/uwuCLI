@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	telemetryMonitorInterval = 30 * time.Second
-	telemetryReportInterval  = time.Minute
+	telemetryMonitorInterval  = 30 * time.Second
+	telemetryReportInterval   = time.Minute
+	telemetryLiveTaskInterval = time.Second
 )
 
 type cpuCounters struct {
@@ -159,10 +160,14 @@ func startMemoryMonitor(root processIdentity, outDir string, sink, liveSink func
 		defer close(monitor.done)
 		ticker := time.NewTicker(telemetryMonitorInterval)
 		defer ticker.Stop()
+		liveTicker := time.NewTicker(telemetryLiveTaskInterval)
+		defer liveTicker.Stop()
 		for {
 			select {
 			case <-ticker.C:
 				monitor.record(false)
+			case <-liveTicker.C:
+				monitor.updateLiveTasks()
 			case <-monitor.stop:
 				monitor.record(true)
 				return
@@ -305,10 +310,19 @@ func classifyBuildProcess(command []byte, fallback string) (string, string) {
 	}(), " "))
 	lowerName := strings.ToLower(name)
 	isJava := lowerName == "java"
+	hasR8Jar := false
+	if isJava {
+		for _, argument := range arguments[1:] {
+			switch strings.ToLower(filepath.Base(string(argument))) {
+			case "r8.jar", "d8.jar":
+				hasR8Jar = true
+			}
+		}
+	}
 	switch {
 	case isJava && (strings.Contains(joined, "com.android.tools.r8.r8") ||
 		strings.Contains(joined, "com.android.tools.r8.d8") ||
-		strings.Contains(joined, " r8.jar") || strings.Contains(joined, " d8.jar")):
+		hasR8Jar):
 		return name, "r8"
 	case strings.Contains(lowerName, "kotlinc") || isJava && (strings.Contains(joined, "kotlinc") || strings.Contains(joined, "kotlin-compiler")):
 		return name, "kotlinc"
@@ -527,6 +541,27 @@ func (monitor *memoryMonitor) record(forceReport bool) {
 	if shouldReport && monitor.sink != nil {
 		monitor.sink(reportSample)
 	}
+}
+
+func (monitor *memoryMonitor) updateLiveTasks() {
+	if monitor.liveSink == nil {
+		return
+	}
+	counts := make(map[string]int)
+	for _, identity := range snapshotProcessTreeForRoot(monitor.root) {
+		base := filepath.Join("/proc", strconv.Itoa(identity.PID))
+		command, commandErr := os.ReadFile(filepath.Join(base, "cmdline"))
+		comm, _ := os.ReadFile(filepath.Join(base, "comm"))
+		if commandErr != nil && len(comm) == 0 {
+			continue
+		}
+		_, taskType := classifyBuildProcess(command, strings.TrimSpace(string(comm)))
+		counts[taskType]++
+	}
+	monitor.liveSink(TelemetrySample{
+		R8: counts["r8"], Linker: counts["linker"], Javac: counts["javac"],
+		Kotlinc: counts["kotlinc"], Rustc: counts["rustc"], Clang: counts["clang"],
+	})
 }
 
 func (monitor *memoryMonitor) finish() SegmentSample {
