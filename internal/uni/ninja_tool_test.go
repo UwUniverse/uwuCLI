@@ -71,7 +71,10 @@ func TestEnsureAssumeExistingNinjaIntegration(t *testing.T) {
 	}
 	buildFile := "rule generate\n" +
 		"  command = cp input output && printf 'run\\n' >> marker\n" +
-		"build output: generate input\n"
+		"build output: generate input\n" +
+		"rule generate_api\n" +
+		"  command = cp input $out && printf 'api\\n' >> api-marker\n" +
+		"build out/soong/.intermediates/frameworks/base/api/stubs/generated_api.txt: generate_api input\n"
 	if err := os.WriteFile(filepath.Join(workspace, "build.ninja"), []byte(buildFile), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -115,5 +118,19 @@ func TestEnsureAssumeExistingNinjaIntegration(t *testing.T) {
 	runNinja("-d", "assumeexisting", "output")
 	if _, err := os.Stat(markerPath); err != nil {
 		t.Fatalf("assumeexisting ignored a newer input: %v", err)
+	}
+	apiOutput := filepath.Join(workspace, "out/soong/.intermediates/frameworks/base/api/stubs/generated_api.txt")
+	if err := os.MkdirAll(filepath.Dir(apiOutput), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(apiOutput, []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(apiOutput, newerInput.Add(2*time.Second), newerInput.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	runNinja("-d", "assumeexisting", "out/soong/.intermediates/frameworks/base/api/stubs/generated_api.txt")
+	if _, err := os.Stat(filepath.Join(workspace, "api-marker")); err != nil {
+		t.Fatalf("assumeexisting trusted an API output missing from the build log: %v", err)
 	}
 }

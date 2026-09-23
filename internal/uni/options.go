@@ -67,7 +67,7 @@ Options:
   --static             Use a fixed schedule (compatibility option)
   --plan               Print the schedule without running Ninja
   --trust-output       Skip recovered output validation
-  --assume-existing    Accept outputs missing from the Ninja log
+  --assume-existing    Reuse unlogged outputs, except API validation outputs
   --force-reuse        Reuse the graph without source freshness checks
   --debug              Write a detailed report to OUT_DIR (default)
   --no-debug           Disable the detailed report for this run
@@ -95,7 +95,7 @@ const usageChinese = `用法: uni [选项] [目标...]
   --static             使用固定调度（兼容选项）
   --plan               输出调度计划，不执行 Ninja
   --trust-output       跳过恢复产物校验
-  --assume-existing    接受 Ninja 日志中缺失的已有产物
+  --assume-existing    复用缺少 Ninja 日志的产物，但重建 API 校验产物
   --force-reuse        跳过源码新鲜度检查并复用构建图
   --debug              在 OUT_DIR 写入详细调试报告（默认开启）
   --no-debug           本次关闭详细调试报告

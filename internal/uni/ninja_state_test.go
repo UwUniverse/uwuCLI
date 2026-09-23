@@ -27,6 +27,24 @@ func testNinjaDeps(payload string) []byte {
 	return append(data, payload...)
 }
 
+func TestAPINinjaOutput(t *testing.T) {
+	for _, test := range []struct {
+		path string
+		want bool
+	}{
+		{"out/soong/.intermediates/frameworks/base/api/stubs/generated_api.txt", true},
+		{"out/soong/.intermediates/packages/providers/MediaProvider/pdf/framework-v/generated_api.txt", true},
+		{"out/soong/.intermediates/packages/providers/MediaProvider/pdf/framework-v/generated_removed.txt", true},
+		{"out/soong/.intermediates/packages/services/Car/car-lib/android_common/everything/check_current_api.timestamp", true},
+		{"out/soong/.intermediates/packages/apps/Settings/Settings-core/kotlin/Settings.jar", false},
+		{"out/target/product/device/system/api/foo", false},
+	} {
+		if got := apiNinjaOutput(test.path); got != test.want {
+			t.Errorf("apiNinjaOutput(%q) = %t, want %t", test.path, got, test.want)
+		}
+	}
+}
+
 func TestMergeNinjaLogKeepsLatestEntries(t *testing.T) {
 	outDir := t.TempDir()
 	backupPath := filepath.Join(ninjaRecoveryDirectory(outDir), ".ninja_log")
@@ -358,6 +376,84 @@ func TestTrustedRecoveryKeepsInterruptedOutputProgress(t *testing.T) {
 	}
 	if strings.Count(string(runs), "run\n") != 1 {
 		t.Fatalf("trusted recovery re-executed the action: %q", runs)
+	}
+}
+
+func TestTrustedRecoveryDiscardsStaleAPIOutput(t *testing.T) {
+	root := t.TempDir()
+	outDir := filepath.Join(root, "out")
+	output := filepath.Join(outDir, "soong/.intermediates/frameworks/base/api/test_api.txt")
+	if err := os.MkdirAll(filepath.Dir(output), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(output, []byte("stale\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	entry := fmt.Sprintf("1\t2\t%d\tout/soong/.intermediates/frameworks/base/api/test_api.txt\thash",
+		time.Now().Add(time.Second).UnixNano())
+	log := []byte(testNinjaLog(entry))
+	if err := os.WriteFile(filepath.Join(outDir, ".ninja_log"), log, 0644); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(ninjaRecoveryDirectory(outDir), ".ninja_log")
+	if err := os.MkdirAll(filepath.Dir(backup), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup, log, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareNinjaState(outDir, true); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := readNinjaLog(filepath.Join(outDir, ".ninja_log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recovered.lines) != 0 {
+		t.Fatalf("trusted recovery retained stale API output: %v", recovered.lines)
+	}
+}
+
+func TestTrustedRecoveryDiscardsAPIOutputsWhenSnapshotDiffers(t *testing.T) {
+	root := t.TempDir()
+	outDir := filepath.Join(root, "out")
+	source := filepath.Join(root, "frameworks/base/core/api/current.txt")
+	generated := filepath.Join(outDir, "soong/.intermediates/frameworks/base/api/api-stubs-docs-non-updatable/android_common/everything/api-stubs-docs-non-updatable_api.txt")
+	regular := filepath.Join(outDir, "regular-output")
+	for path, content := range map[string]string{
+		source:    "source\n",
+		generated: "stale\n",
+		regular:   "complete\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := fmt.Sprintf("1\t2\t%d\tregular-output\thash", time.Now().Add(time.Second).UnixNano())
+	apiEntry := fmt.Sprintf("1\t2\t%d\tout/soong/.intermediates/frameworks/base/api/api-stubs-docs-non-updatable/android_common/everything/api-stubs-docs-non-updatable_api.txt\thash", time.Now().Add(time.Second).UnixNano())
+	log := []byte(testNinjaLog(entry, apiEntry))
+	if err := os.WriteFile(filepath.Join(outDir, ".ninja_log"), log, 0644); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(ninjaRecoveryDirectory(outDir), ".ninja_log")
+	if err := os.MkdirAll(filepath.Dir(backup), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup, log, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareNinjaState(outDir, true); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := readNinjaLog(filepath.Join(outDir, ".ninja_log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recovered.lines) != 1 || recovered.lines["regular-output"] == "" {
+		t.Fatalf("trusted recovery did not isolate stale API output: %v", recovered.lines)
 	}
 }
 

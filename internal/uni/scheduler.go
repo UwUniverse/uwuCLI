@@ -442,7 +442,7 @@ func Run(ctx context.Context, options Options) error {
 		if err != nil {
 			return fmt.Errorf("prepare assume-existing Ninja: %w", err)
 		}
-		fmt.Printf("uni: assume existing outputs with missing Ninja log entries\n")
+		fmt.Printf("uni: assume existing unlogged outputs; rebuild API validation outputs\n")
 	}
 	report.event("recovery trust_output=%t assume_existing=%t", options.TrustOutput, options.AssumeExisting)
 	if err := prepareNinjaState(outDir, options.TrustOutput); err != nil {

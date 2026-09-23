@@ -129,6 +129,99 @@ func filterNinjaLogByOutputs(data ninjaLogData, outDir string) ninjaLogData {
 	return filtered
 }
 
+func apiNinjaOutput(output string) bool {
+	normalized := filepath.ToSlash(output)
+	if !strings.Contains(normalized, "/.intermediates/") {
+		return false
+	}
+	return strings.Contains(normalized, "/api/") ||
+		strings.Contains(normalized, "_api.txt") ||
+		strings.Contains(normalized, "_removed.txt") ||
+		strings.Contains(normalized, "check_current_api.timestamp") ||
+		strings.Contains(normalized, "check_last_released_api.timestamp") ||
+		strings.Contains(normalized, "api_lint.timestamp")
+}
+
+func filterTrustedNinjaLogByAPIOutputs(data ninjaLogData, outDir string, apiMismatch bool) ninjaLogData {
+	filtered := ninjaLogData{
+		header: data.header,
+		lines:  make(map[string]string, len(data.lines)),
+		order:  make([]string, 0, len(data.order)),
+	}
+	for _, output := range data.order {
+		line := data.lines[output]
+		if !apiNinjaOutput(output) {
+			filtered.order = append(filtered.order, output)
+			filtered.lines[output] = line
+			continue
+		}
+		if apiMismatch {
+			continue
+		}
+		fields := strings.SplitN(line, "\t", 5)
+		if len(fields) != 5 {
+			continue
+		}
+		loggedMtime, err := strconv.ParseInt(fields[2], 10, 64)
+		if err != nil {
+			continue
+		}
+		path := output
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(filepath.Dir(outDir), filepath.FromSlash(path))
+			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+				path = filepath.Join(outDir, filepath.FromSlash(output))
+			}
+		}
+		info, err := os.Stat(path)
+		if err != nil || info.ModTime().UnixNano() != loggedMtime {
+			continue
+		}
+		filtered.order = append(filtered.order, output)
+		filtered.lines[output] = line
+	}
+	return filtered
+}
+
+func apiSnapshotMismatch(outDir string) (bool, error) {
+	top := filepath.Dir(outDir)
+	pairs := []struct {
+		source string
+		output string
+	}{
+		{"current.txt", "api-stubs-docs-non-updatable"},
+		{"system-current.txt", "system-api-stubs-docs-non-updatable"},
+		{"module-lib-current.txt", "module-lib-api-stubs-docs-non-updatable"},
+		{"test-current.txt", "test-api-stubs-docs-non-updatable"},
+		{"removed.txt", "api-stubs-docs-non-updatable"},
+		{"system-removed.txt", "system-api-stubs-docs-non-updatable"},
+		{"module-lib-removed.txt", "module-lib-api-stubs-docs-non-updatable"},
+		{"test-removed.txt", "test-api-stubs-docs-non-updatable"},
+	}
+	for _, pair := range pairs {
+		source := filepath.Join(top, "frameworks/base/core/api", pair.source)
+		if _, err := os.Stat(source); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return false, err
+		}
+		suffix := "_api.txt"
+		if strings.HasSuffix(pair.source, "removed.txt") {
+			suffix = "_removed.txt"
+		}
+		output := filepath.Join(outDir, "soong/.intermediates/frameworks/base/api", pair.output,
+			"android_common/everything", pair.output+suffix)
+		equal, err := filesEqual(source, output)
+		if err != nil {
+			return false, err
+		}
+		if !equal {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func writeNinjaLogAtomic(path string, data ninjaLogData) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0777); err != nil {
 		return err
@@ -352,7 +445,7 @@ func ninjaRecoveryRequired(outDir string) (bool, error) {
 func recoverNinjaLog(outDir string, forceMerge, trustOutput bool) error {
 	currentPath := filepath.Join(outDir, ".ninja_log")
 	backupPath := filepath.Join(ninjaRecoveryDirectory(outDir), ".ninja_log")
-	if !forceMerge {
+	if !forceMerge && !trustOutput {
 		equal, err := filesEqual(currentPath, backupPath)
 		if err != nil {
 			return err
@@ -378,9 +471,21 @@ func recoverNinjaLog(outDir string, forceMerge, trustOutput bool) error {
 	if currentErr != nil {
 		current = ninjaLogData{lines: make(map[string]string)}
 	}
-	if !trustOutput {
+	fullValidation := !trustOutput
+	apiMismatch := false
+	if trustOutput {
+		var err error
+		apiMismatch, err = apiSnapshotMismatch(outDir)
+		if err != nil {
+			return err
+		}
+	}
+	if fullValidation {
 		backup = filterNinjaLogByOutputs(backup, outDir)
 		current = filterNinjaLogByOutputs(current, outDir)
+	} else {
+		backup = filterTrustedNinjaLogByAPIOutputs(backup, outDir, apiMismatch)
+		current = filterTrustedNinjaLogByAPIOutputs(current, outDir, apiMismatch)
 	}
 	merged := mergeNinjaLogs(backup, current)
 	if merged.header == "" {
