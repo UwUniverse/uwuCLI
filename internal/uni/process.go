@@ -473,7 +473,22 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 					pressure = memoryPressureGuard{}
 					continue
 				}
-				if pressure.observe(now, memory, psi.full.avg10) {
+				linkerHeavy := false
+				if memory.Total > 0 && memory.Available < 2*max(3*gibibyte, memory.Total/8) && psi.full.avg10 >= 35 {
+					linkers := 0
+					threshold := max(4, (maxJobs+2)/3)
+					for _, identity := range snapshotProcessTreeForRoot(rootIdentity) {
+						process, err := readProcessTelemetry(identity)
+						if err == nil && process.taskType == "linker" {
+							linkers++
+							if linkers >= threshold {
+								linkerHeavy = true
+								break
+							}
+						}
+					}
+				}
+				if pressure.observe(now, memory, psi.full.avg10, linkerHeavy) {
 					pressureTriggered = true
 					terminateBuildProcessTree(rootIdentity, scopeUnit, runner.outDir)
 					return

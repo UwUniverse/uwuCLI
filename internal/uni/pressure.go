@@ -31,13 +31,19 @@ type memoryPressureGuard struct {
 	since time.Time
 }
 
-func (guard *memoryPressureGuard) observe(now time.Time, memory MemorySnapshot, fullAvg10 float64) bool {
+func (guard *memoryPressureGuard) observe(now time.Time, memory MemorySnapshot, fullAvg10 float64, linkerHeavy bool) bool {
 	if memory.Total <= 0 || memory.Available < 0 {
 		guard.since = time.Time{}
 		return false
 	}
 	reserve := max(3*gibibyte, memory.Total/8)
 	pressured := memory.Available < reserve && fullAvg10 >= 20
+	if memory.Available < memory.Total/3 && fullAvg10 >= 45 {
+		pressured = true
+	}
+	if linkerHeavy && memory.Available < 2*reserve && fullAvg10 >= 35 {
+		pressured = true
+	}
 	if memory.Available >= 0 && memory.Available < gibibyte/2 {
 		pressured = true
 	}
