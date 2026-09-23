@@ -22,6 +22,18 @@ func TestOutputLockRejectsConcurrentScheduler(t *testing.T) {
 	}
 }
 
+func TestSigningCheckProductOutUsesLunchOutput(t *testing.T) {
+	outDir := "/src/out"
+	t.Setenv("ANDROID_PRODUCT_OUT", "/src/out/target/product/nabu")
+	if got, want := signingCheckProductOut(outDir, "uwu_nabu"), "/src/out/target/product/nabu"; got != want {
+		t.Fatalf("signing check product output = %q, want %q", got, want)
+	}
+	t.Setenv("ANDROID_PRODUCT_OUT", "")
+	if got, want := signingCheckProductOut(outDir, "uwu_nabu"), "/src/out/target/product/uwu_nabu"; got != want {
+		t.Fatalf("signing check fallback output = %q, want %q", got, want)
+	}
+}
+
 func TestFormatBuildDuration(t *testing.T) {
 	tests := map[time.Duration]string{
 		7 * time.Second:                                                     "7 seconds",

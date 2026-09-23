@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -47,6 +48,13 @@ func outputDirectory(top string) (string, error) {
 		outDir = filepath.Join(top, outDir)
 	}
 	return filepath.Abs(outDir)
+}
+
+func signingCheckProductOut(outDir, product string) string {
+	if productOut := strings.TrimSpace(os.Getenv("ANDROID_PRODUCT_OUT")); productOut != "" {
+		return filepath.Clean(productOut)
+	}
+	return filepath.Join(outDir, "target", "product", product)
 }
 
 type outputLock struct {
@@ -327,6 +335,19 @@ func Run(ctx context.Context, options Options) error {
 	if err != nil {
 		return err
 	}
+	if options.InitSigningKeys != "" {
+		keysDir, err := initializeSigningKeys(ctx, top, options.InitSigningKeys)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("uni: signing keys initialized: %s\n", keysDir)
+		return nil
+	}
+	if options.SignKeys != "" {
+		if _, err := validateSigningKeysDirectory(options.SignKeys); err != nil {
+			return err
+		}
+	}
 	if options.CleanLogs {
 		outDir, err := outputDirectory(top)
 		if err != nil {
@@ -381,16 +402,29 @@ func Run(ctx context.Context, options Options) error {
 			sourceRevision(filepath.Join(top, "build", "blueprint")))
 		defer report.close(outDir)
 	}
+	if options.SignCheck {
+		state := State{
+			TargetProduct: product,
+			ProductOut:    signingCheckProductOut(outDir, product),
+		}
+		result, err := runSigning(ctx, top, outDir, state, options)
+		if err != nil {
+			return fmt.Errorf("signing check: %w", err)
+		}
+		report.event("signing check=true source=%s target_files=%s ota=%s checksum=%s", result.SourceTargetFiles, result.SignedTargetFiles, result.SignedOTA, result.Checksum)
+		fmt.Printf("uni: signing check passed: %s\n", result.SignedOTA)
+		return nil
+	}
 	startupCleanup := terminateResidualBuildProcesses(outDir)
 	report.event("process_cleanup when=start found=%d term_sent=%d kill_sent=%d remaining=%d",
 		startupCleanup.Found, startupCleanup.TermSent, startupCleanup.KillSent, startupCleanup.Remaining)
 	if startupCleanup.Remaining > 0 {
 		return fmt.Errorf("%d residual uni build process(es) survived cleanup", startupCleanup.Remaining)
 	}
-	report.event("options jobs=%d load_set=%t load=%.2f batch=%d static=%t plan=%t debug=%t dev=%t dev_auto=%t trust_output=%t assume_existing=%t force_reuse=%t full_build=%t dist=%t targets=%d key_values=%d",
+	report.event("options jobs=%d load_set=%t load=%.2f batch=%d static=%t plan=%t debug=%t dev=%t dev_auto=%t trust_output=%t assume_existing=%t force_reuse=%t full_build=%t dist=%t signing=%t targets=%d key_values=%d",
 		options.MaxJobs, options.LoadSet, options.LoadAverage, options.BatchSize, options.Static, options.Plan,
 		options.Debug, options.Dev, options.DevAuto, options.TrustOutput, options.AssumeExisting,
-		options.ForceReuse, options.FullBuild, options.Dist, len(options.Targets), len(options.KeyValues))
+		options.ForceReuse, options.FullBuild, options.Dist, options.SignKeys != "", len(options.Targets), len(options.KeyValues))
 	r8Mode := R8IndexFast
 	r8IndexMode := "fast"
 	if options.Dev {
@@ -710,6 +744,15 @@ func Run(ctx context.Context, options Options) error {
 		}
 	}
 	if err == nil {
+		if options.SignKeys != "" {
+			result, signingErr := runSigning(ctx, top, outDir, state, options)
+			if signingErr != nil {
+				return fmt.Errorf("sign build: %w", signingErr)
+			}
+			report.event("signing check=false source=%s target_files=%s ota=%s checksum=%s", result.SourceTargetFiles, result.SignedTargetFiles, result.SignedOTA, result.Checksum)
+			fmt.Printf("uni: signed package=%s\n", result.SignedOTA)
+			fmt.Printf("uni: checksum=%s\n", result.Checksum)
+		}
 		if state.TaskMetadata == "" {
 			report.event("history_write result=skipped reason=task-metadata-disabled")
 		} else {
