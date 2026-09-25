@@ -52,6 +52,16 @@ func TestEnvironmentTrue(t *testing.T) {
 	}
 }
 
+func TestMemoryPressureProtectionIsOptIn(t *testing.T) {
+	if environmentTrue(nil, "UNI_STOP_ON_MEMORY_PRESSURE") {
+		t.Fatal("memory pressure protection enabled without an explicit setting")
+	}
+	if !environmentTrue([]string{"UNI_STOP_ON_MEMORY_PRESSURE=1"},
+		"UNI_STOP_ON_MEMORY_PRESSURE") {
+		t.Fatal("memory pressure protection ignored explicit enablement")
+	}
+}
+
 func TestCcacheMaxSizeForDisk(t *testing.T) {
 	tests := []struct {
 		name          string

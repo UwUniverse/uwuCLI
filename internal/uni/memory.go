@@ -189,6 +189,9 @@ func memoryPoolJobs(maxJobs int, snapshot MemorySnapshot, bytesPerJob int64) int
 	if budget <= 0 {
 		return 1
 	}
+	if snapshot.SwapTotal > 0 && snapshot.SwapFree < 2*gibibyte {
+		budget = min(budget, max(gibibyte, snapshot.Available/3))
+	}
 	return max(1, min(limit, int(budget/bytesPerJob)))
 }
 

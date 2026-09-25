@@ -447,12 +447,10 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 	monitor := startMemoryMonitor(rootIdentity, runner.outDir, telemetrySink, liveTelemetrySink)
 	done := make(chan struct{})
 	cancelFinished := make(chan struct{})
-	pressureTriggered := false
 	go func() {
 		defer close(cancelFinished)
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
-		var pressure memoryPressureGuard
 		for {
 			select {
 			case <-ctx.Done():
@@ -467,32 +465,9 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 				if mode != "--uni-ninja-mode" {
 					continue
 				}
-				memory, memoryErr := ReadMemorySnapshot()
-				psi, psiErr := readMemoryPSI()
-				if memoryErr != nil || psiErr != nil {
-					pressure = memoryPressureGuard{}
-					continue
-				}
-				linkerHeavy := false
-				if memory.Total > 0 && memory.Available < 2*max(3*gibibyte, memory.Total/8) && psi.full.avg10 >= 35 {
-					linkers := 0
-					threshold := max(4, (maxJobs+2)/3)
-					for _, identity := range snapshotProcessTreeForRoot(rootIdentity) {
-						process, err := readProcessTelemetry(identity)
-						if err == nil && process.taskType == "linker" {
-							linkers++
-							if linkers >= threshold {
-								linkerHeavy = true
-								break
-							}
-						}
-					}
-				}
-				if pressure.observe(now, memory, psi.full.avg10, linkerHeavy) {
-					pressureTriggered = true
-					terminateBuildProcessTree(rootIdentity, scopeUnit, runner.outDir)
-					return
-				}
+				// Resource pressure is reported by the live telemetry monitor. Do not
+				// terminate a running build from this observer.
+				_ = now
 			}
 		}
 	}()
@@ -534,12 +509,6 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 	}
 	if leaseErr != nil && err == nil {
 		return sample, fmt.Errorf("clear active build: %w", leaseErr)
-	}
-	if pressureTriggered && err != nil && ctx.Err() == nil && checkpointErr == nil && leaseErr == nil {
-		if len(runningUniProcesses(runner.outDir)) != 0 {
-			return sample, fmt.Errorf("memory recovery stopped: build processes remain")
-		}
-		return sample, errMemoryPressure
 	}
 	if err != nil {
 		if ctx.Err() != nil {
