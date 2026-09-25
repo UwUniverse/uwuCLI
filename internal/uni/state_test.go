@@ -71,6 +71,15 @@ func TestProductTargetsAndStableShuffle(t *testing.T) {
 	}
 }
 
+func TestCurrentNinjaTargetsKeepsFullAndModuleBuildsDistinct(t *testing.T) {
+	if got := currentNinjaTargets(Options{}); !reflect.DeepEqual(got, []string{"droid"}) {
+		t.Fatalf("full build targets = %v, want droid", got)
+	}
+	if got := currentNinjaTargets(Options{Targets: []string{"SystemUI"}}); !reflect.DeepEqual(got, []string{"SystemUI"}) {
+		t.Fatalf("module build targets = %v, want SystemUI", got)
+	}
+}
+
 func TestBatches(t *testing.T) {
 	targets := make([]string, 1001)
 	for i := range targets {

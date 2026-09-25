@@ -457,7 +457,7 @@ func TestTrustedRecoveryDiscardsAPIOutputsWhenSnapshotDiffers(t *testing.T) {
 	}
 }
 
-func TestInitialRecoveryValidatesWithoutTrust(t *testing.T) {
+func TestInitialRecoveryPreservesCurrentLog(t *testing.T) {
 	outDir := t.TempDir()
 	outputPath := filepath.Join(outDir, "output")
 	if err := os.WriteFile(outputPath, []byte("complete\n"), 0644); err != nil {
@@ -486,8 +486,8 @@ func TestInitialRecoveryValidatesWithoutTrust(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recovered.lines) != 0 {
-		t.Fatalf("untrusted initial recovery retained invalid progress: %v", recovered.lines)
+	if len(recovered.lines) != 1 {
+		t.Fatalf("initial recovery discarded current progress: %v", recovered.lines)
 	}
 }
 

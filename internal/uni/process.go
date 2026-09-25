@@ -212,10 +212,17 @@ func newCommandRunner(ctx context.Context, top string, keyValues []string) (*com
 }
 
 func (runner *commandRunner) runReported(ctx context.Context, report *debugReport, summary *buildSummary, name, mode, phase, statePath string, args []string, maxJobs int) (SegmentSample, error) {
-	return runner.runReportedAttempt(ctx, report, summary, name, mode, phase, statePath, args, maxJobs, 0)
+	return runner.runReportedAttempt(ctx, report, summary, name, mode, phase, statePath, args, maxJobs, 0, true)
 }
 
-func (runner *commandRunner) runReportedAttempt(ctx context.Context, report *debugReport, summary *buildSummary, name, mode, phase, statePath string, args []string, maxJobs, memoryRetries int) (SegmentSample, error) {
+// runUnmanagedReported hands the prepared graph to one standard executor run.
+// It keeps telemetry and recovery bookkeeping, but does not apply uni's
+// scheduler controls to the build process.
+func (runner *commandRunner) runUnmanagedReported(ctx context.Context, report *debugReport, summary *buildSummary, name, mode, phase, statePath string, args []string, maxJobs int) (SegmentSample, error) {
+	return runner.runReportedAttempt(ctx, report, summary, name, mode, phase, statePath, args, maxJobs, 0, false)
+}
+
+func (runner *commandRunner) runReportedAttempt(ctx context.Context, report *debugReport, summary *buildSummary, name, mode, phase, statePath string, args []string, maxJobs, memoryRetries int, managed bool) (SegmentSample, error) {
 	tui := compactTUIFromContext(ctx)
 	if tui != nil {
 		tui.phaseStarted(name, maxJobs)
@@ -234,7 +241,7 @@ func (runner *commandRunner) runReportedAttempt(ctx context.Context, report *deb
 	if tui != nil {
 		liveTelemetrySink = tui.updateTelemetry
 	}
-	sample, err := runner.runWithTelemetry(ctx, mode, phase, statePath, args, maxJobs, memoryRetries, telemetrySink, liveTelemetrySink)
+	sample, err := runner.runWithTelemetry(ctx, mode, phase, statePath, args, maxJobs, memoryRetries, managed, telemetrySink, liveTelemetrySink)
 	sample.Phase = name
 	sample.Duration = time.Since(started)
 	summary.add(sample)
@@ -249,25 +256,27 @@ func (runner *commandRunner) runReportedAttempt(ctx context.Context, report *deb
 	if tui != nil {
 		tui.phaseFinished(name, err)
 	}
-	if jobs, retry := memoryRetryJobs(err, ctx.Err(), maxJobs, memoryRetries); retry {
-		nextRetry := memoryRetries + 1
-		fmt.Printf("uni: sustained memory pressure; waiting before -j%d retry %d/2\n", jobs, nextRetry)
-		if report != nil {
-			report.event("memory_recovery_wait retry=%d jobs=%d timeout=%s", nextRetry, jobs, memoryRecoveryTimeout)
-		}
-		waited, recovered := waitForMemoryRecovery(ctx, memoryRecoveryTimeout)
-		if report != nil {
-			report.event("memory_recovery_wait_end retry=%d jobs=%d elapsed=%s recovered=%t", nextRetry, jobs, waited.Round(time.Millisecond), recovered)
-		}
-		if !recovered {
-			if ctx.Err() != nil {
-				return sample, ctx.Err()
+	if managed {
+		if jobs, retry := memoryRetryJobs(err, ctx.Err(), maxJobs, memoryRetries); retry {
+			nextRetry := memoryRetries + 1
+			fmt.Printf("uni: sustained memory pressure; waiting before -j%d retry %d/2\n", jobs, nextRetry)
+			if report != nil {
+				report.event("memory_recovery_wait retry=%d jobs=%d timeout=%s", nextRetry, jobs, memoryRecoveryTimeout)
 			}
-			return sample, fmt.Errorf("%w: pressure remained high for %s", errMemoryPressure, waited.Round(time.Second))
+			waited, recovered := waitForMemoryRecovery(ctx, memoryRecoveryTimeout)
+			if report != nil {
+				report.event("memory_recovery_wait_end retry=%d jobs=%d elapsed=%s recovered=%t", nextRetry, jobs, waited.Round(time.Millisecond), recovered)
+			}
+			if !recovered {
+				if ctx.Err() != nil {
+					return sample, ctx.Err()
+				}
+				return sample, fmt.Errorf("%w: pressure remained high for %s", errMemoryPressure, waited.Round(time.Second))
+			}
+			fmt.Printf("uni: memory pressure recovered after %s; resuming completed outputs\n", waited.Round(time.Second))
+			return runner.runReportedAttempt(ctx, report, summary, name, mode, phase, statePath,
+				replaceParallelArgs(args, jobs), jobs, nextRetry, true)
 		}
-		fmt.Printf("uni: memory pressure recovered after %s; resuming completed outputs\n", waited.Round(time.Second))
-		return runner.runReportedAttempt(ctx, report, summary, name, mode, phase, statePath,
-			replaceParallelArgs(args, jobs), jobs, nextRetry)
 	}
 	return sample, err
 }
@@ -286,10 +295,10 @@ func (runner *commandRunner) probeCgroup(ctx context.Context) bool {
 }
 
 func (runner *commandRunner) run(ctx context.Context, mode, phase, statePath string, args []string, maxJobs int) (SegmentSample, error) {
-	return runner.runWithTelemetry(ctx, mode, phase, statePath, args, maxJobs, 0, nil, nil)
+	return runner.runWithTelemetry(ctx, mode, phase, statePath, args, maxJobs, 0, true, nil, nil)
 }
 
-func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, statePath string, args []string, maxJobs, memoryRetries int, telemetrySink, liveTelemetrySink func(TelemetrySample)) (SegmentSample, error) {
+func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, statePath string, args []string, maxJobs, memoryRetries int, managed bool, telemetrySink, liveTelemetrySink func(TelemetrySample)) (SegmentSample, error) {
 	snapshot, err := ReadMemorySnapshot()
 	var telemetryWarnings []string
 	if err != nil {
@@ -348,13 +357,17 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 		fmt.Printf("uni: Android.bp analysis memory limit %s, GOGC=%d\n",
 			formatBytes(analysisMemoryLimit), analysisGCPercent)
 	}
-	if forcePhasedNinja(mode, phase, runner.assumeExistingNinja, runner.forceLocalNinja) {
+	forceNinja := managed && forcePhasedNinja(mode, phase, runner.assumeExistingNinja, runner.forceLocalNinja)
+	if !managed && mode == "--uni-ninja-mode" && runner.forceLocalNinja {
+		forceNinja = true
+	}
+	if forceNinja {
 		overrides = append(overrides, "SOONG_NINJA="+runner.phasedNinja)
 		if runner.phasedNinja == "ninja" {
 			overrides = append(overrides, "NO_ABFS=true")
 		}
 	}
-	if mode == "--uni-ninja-mode" {
+	if managed && mode == "--uni-ninja-mode" {
 		if runner.kernelJobs > 0 {
 			if _, set := environmentValue(runner.baseEnv, "UNI_KERNEL_JOBS"); !set {
 				overrides = append(overrides, "UNI_KERNEL_JOBS="+strconv.Itoa(runner.kernelJobs))
@@ -385,27 +398,32 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 	if runner.autoCcacheFileClone {
 		overrides = append(overrides, "CCACHE_FILECLONE=true")
 	}
-	pools := runner.admission.decide(maxJobs, snapshot, runner.baseEnv, runner.rustCodegenUnits)
-	pools = pools.forMemoryRetry(memoryRetries)
+	var pools poolDecision
+	if managed {
+		pools = runner.admission.decide(maxJobs, snapshot, runner.baseEnv, runner.rustCodegenUnits)
+		pools = pools.forMemoryRetry(memoryRetries)
+	}
 	highmemJobs, r8Jobs, rustJobs := pools.highmem, pools.r8, pools.rust
 	javaJobs, kotlinJobs := pools.java, pools.kotlin
-	if !pools.highmemExplicit {
+	if managed && !pools.highmemExplicit {
 		overrides = append(overrides, "NINJA_HIGHMEM_NUM_JOBS="+strconv.Itoa(highmemJobs))
 	}
-	if !pools.r8Explicit {
+	if managed && !pools.r8Explicit {
 		overrides = append(overrides, "NINJA_UNI_R8_NUM_JOBS="+strconv.Itoa(r8Jobs))
 	}
-	if !pools.rustExplicit {
+	if managed && !pools.rustExplicit {
 		overrides = append(overrides, "NINJA_UNI_RUST_NUM_JOBS="+strconv.Itoa(rustJobs))
 	}
-	if !pools.javaExplicit {
+	if managed && !pools.javaExplicit {
 		overrides = append(overrides, "NINJA_UNI_JAVA_NUM_JOBS="+strconv.Itoa(javaJobs))
 	}
-	if !pools.kotlinExplicit {
+	if managed && !pools.kotlinExplicit {
 		overrides = append(overrides, "NINJA_UNI_KOTLIN_NUM_JOBS="+strconv.Itoa(kotlinJobs))
 	}
-	fmt.Printf("uni: pools high-memory=%d R8=%d Rust=%d Java=%d Kotlin=%d, available %s\n",
-		highmemJobs, r8Jobs, rustJobs, javaJobs, kotlinJobs, formatBytes(snapshot.Available))
+	if managed {
+		fmt.Printf("uni: pools high-memory=%d R8=%d Rust=%d Java=%d Kotlin=%d, available %s\n",
+			highmemJobs, r8Jobs, rustJobs, javaJobs, kotlinJobs, formatBytes(snapshot.Available))
+	}
 	environment := overrideEnvironment(runner.baseEnv, overrides...)
 	cmd.Env = environment
 
@@ -464,7 +482,7 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 				}
 				return
 			case now := <-ticker.C:
-				if mode != "--uni-ninja-mode" {
+				if !managed || mode != "--uni-ninja-mode" {
 					continue
 				}
 				memory, memoryErr := ReadMemorySnapshot()
@@ -521,7 +539,8 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 	}
 	var checkpointErr error
 	if mode == "--uni-ninja-mode" {
-		checkpointErr = checkpointNinjaState(runner.outDir, err != nil, runner.trustOutput)
+		interrupted := pressureTriggered || ctx.Err() != nil
+		checkpointErr = checkpointNinjaState(runner.outDir, interrupted, runner.trustOutput)
 		if checkpointErr == nil {
 			checkpointErr = clearNinjaRecoveryRequired(runner.outDir)
 		}
