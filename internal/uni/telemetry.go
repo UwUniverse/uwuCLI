@@ -56,6 +56,7 @@ type TelemetrySample struct {
 	Elapsed         time.Duration
 	RootPID         int
 	MemoryAvailable int64
+	SwapTotal       int64
 	SwapFree        int64
 	SwapInBytes     uint64
 	SwapOutBytes    uint64
@@ -521,6 +522,7 @@ func (monitor *memoryMonitor) record(forceReport bool) {
 	if shouldReport {
 		if point.memoryOK {
 			reportSample.MemoryAvailable = point.memory.Available
+			reportSample.SwapTotal = point.memory.SwapTotal
 			reportSample.SwapFree = point.memory.SwapFree
 			reportSample.SwapInBytes = counterDelta(point.memory.SwapInPage, monitor.baseSwapIn) * uint64(os.Getpagesize())
 			reportSample.SwapOutBytes = counterDelta(point.memory.SwapOutPage, monitor.baseSwapOut) * uint64(os.Getpagesize())
@@ -558,8 +560,16 @@ func (monitor *memoryMonitor) updateLiveTasks() {
 		_, taskType := classifyBuildProcess(command, strings.TrimSpace(string(comm)))
 		counts[taskType]++
 	}
+	memory, _ := ReadMemorySnapshot()
+	monitor.mu.Lock()
+	baseSwapOut := monitor.baseSwapOut
+	monitor.mu.Unlock()
 	monitor.liveSink(TelemetrySample{
-		R8: counts["r8"], Linker: counts["linker"], Javac: counts["javac"],
+		MemoryAvailable: memory.Available,
+		SwapTotal:       memory.SwapTotal,
+		SwapFree:        memory.SwapFree,
+		SwapOutBytes:    counterDelta(memory.SwapOutPage, baseSwapOut) * uint64(os.Getpagesize()),
+		R8:              counts["r8"], Linker: counts["linker"], Javac: counts["javac"],
 		Kotlinc: counts["kotlinc"], Rustc: counts["rustc"], Clang: counts["clang"],
 	})
 }

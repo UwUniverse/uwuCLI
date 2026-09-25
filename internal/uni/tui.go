@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	compactTUIRefreshInterval = 33 * time.Millisecond
+	compactTUIRefreshInterval = 80 * time.Millisecond
 	compactTUISpinnerInterval = 200 * time.Millisecond
 	compactTUILogLines        = 160
 	compactTUIWheelStep       = 3
@@ -121,6 +121,9 @@ type compactTUI struct {
 	details      bool
 	r8           int
 	memory       int64
+	swapTotal    int64
+	swapFree     int64
+	swapOut      uint64
 	spinner      int
 	spinnerAt    time.Time
 	copyMode     bool
@@ -226,6 +229,8 @@ func newCompactTUI(input, terminal *os.File) *compactTUI {
 	}
 	if snapshot, err := ReadMemorySnapshot(); err == nil {
 		tui.memory = snapshot.Available
+		tui.swapTotal = snapshot.SwapTotal
+		tui.swapFree = snapshot.SwapFree
 	}
 	return tui
 }
@@ -295,6 +300,11 @@ func (tui *compactTUI) updateTelemetry(sample TelemetrySample) {
 	defer tui.mu.Unlock()
 	if sample.MemoryAvailable > 0 {
 		tui.memory = sample.MemoryAvailable
+	}
+	if sample.SwapTotal > 0 {
+		tui.swapTotal = sample.SwapTotal
+		tui.swapFree = sample.SwapFree
+		tui.swapOut = sample.SwapOutBytes
 	}
 	tui.r8 = sample.R8
 	if tui.active != nil && tui.active.status == compactTaskRunning {
@@ -513,6 +523,24 @@ func compactMemory(value int64) string {
 	return fmt.Sprintf("%.1fG", float64(value)/float64(gibibyte))
 }
 
+func compactSwap(used, total int64) string {
+	if total <= 0 {
+		return "off"
+	}
+	if used < 0 {
+		used = 0
+	}
+	return fmt.Sprintf("%.1f/%.1fG", float64(used)/float64(gibibyte),
+		float64(total)/float64(gibibyte))
+}
+
+func compactBytes(value uint64) string {
+	if value == 0 {
+		return "0B"
+	}
+	return formatBytes(int64(value))
+}
+
 func truncateCompactLine(line string, width int) string {
 	if width < 1 {
 		return ""
@@ -628,9 +656,13 @@ func (tui *compactTUI) frame(force bool) string {
 	output.WriteByte('\n')
 	output.WriteString(truncateCompactLine(fmt.Sprintf("  %s %s %s", compactPadRight(tui.messages.memory, 9), compactMemory(tui.memory), tui.messages.available), lineWidth))
 	output.WriteByte('\n')
+	output.WriteString(truncateCompactLine(fmt.Sprintf("  Swap      %s  out=%s", compactSwap(tui.swapTotal-tui.swapFree, tui.swapTotal), compactBytes(tui.swapOut)), lineWidth))
+	output.WriteByte('\n')
 	if tui.details {
 		output.WriteByte('\n')
-		available := int(size.rows) - 11
+		// The details separator and the reserved latest-output row are both part of
+		// the frame height. Keep the header and task rows visible on short terminals.
+		available := int(size.rows) - 12
 		if available < 3 {
 			available = 3
 		}
@@ -660,12 +692,15 @@ func (tui *compactTUI) frame(force bool) string {
 	}
 	output.WriteString(truncateCompactLine(footer, lineWidth))
 	output.WriteByte('\n')
-	if tui.active != nil && tui.active.latest != "" && (!tui.details || tui.scrollOffset == 0) {
-		latest := truncateCompactDisplayLine(tui.active.latest, lineWidth-2)
-		output.WriteString("  ")
-		output.WriteString(latest)
-		output.WriteByte('\n')
+	latest := ""
+	if tui.active != nil && (!tui.details || tui.scrollOffset == 0) {
+		latest = truncateCompactDisplayLine(tui.active.latest, lineWidth-2)
 	}
+	output.WriteString("  ")
+	if latest != "" {
+		output.WriteString(latest)
+	}
+	output.WriteByte('\n')
 	return strings.TrimSuffix(output.String(), "\n")
 }
 

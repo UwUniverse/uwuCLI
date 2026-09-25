@@ -108,7 +108,13 @@ func TestCompactTUITracksPhaseProgressAndTelemetry(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
 	tui.phaseStarted("startup", 9)
 	tui.consume("[ 79% 15175/19054] //module:target r8 [common]")
-	tui.updateTelemetry(TelemetrySample{MemoryAvailable: 13 * gibibyte, Linker: 1})
+	tui.updateTelemetry(TelemetrySample{
+		MemoryAvailable: 13 * gibibyte,
+		SwapTotal:       8 * gibibyte,
+		SwapFree:        3 * gibibyte,
+		SwapOutBytes:    2 * gibibyte,
+		Linker:          1,
+	})
 
 	task := tui.byName["Startup"]
 	if task.status != compactTaskRunning || task.jobs != 9 || task.percent != 79 || task.done != 15175 || task.total != 19054 {
@@ -116,6 +122,9 @@ func TestCompactTUITracksPhaseProgressAndTelemetry(t *testing.T) {
 	}
 	if tui.r8 != 0 || tui.memory != 13*gibibyte {
 		t.Fatalf("unexpected telemetry: r8=%d memory=%d", tui.r8, tui.memory)
+	}
+	if tui.swapTotal != 8*gibibyte || tui.swapFree != 3*gibibyte || tui.swapOut != 2*gibibyte {
+		t.Fatalf("unexpected swap telemetry: total=%d free=%d out=%d", tui.swapTotal, tui.swapFree, tui.swapOut)
 	}
 	if task.activity != "link=1" || !strings.Contains(tui.taskLine(task), "link=1") {
 		t.Fatalf("active linker is not visible: task=%+v line=%q", *task, tui.taskLine(task))
@@ -379,8 +388,34 @@ func TestCompactTUIRenderDoesNotScrollOnRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "\x1b[8A\x1b[1G") {
+	if !strings.Contains(string(data), "\x1b[10A\x1b[1G") {
 		t.Fatalf("refresh did not return to the previous frame: %q", data)
+	}
+}
+
+func TestCompactTUIFrameKeepsStableHeightWithoutLatestOutput(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	withoutLatest := tui.frame(true)
+	tui.consume("build output")
+	withLatest := tui.frame(true)
+	if compactFrameLines(withoutLatest) != compactFrameLines(withLatest) {
+		t.Fatalf("frame height changed when latest output appeared: before=%d after=%d", compactFrameLines(withoutLatest), compactFrameLines(withLatest))
+	}
+}
+
+func TestCompactTUIDetailsFitTerminalHeight(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	tui.phaseStarted("startup", 18)
+	for i := 0; i < 100; i++ {
+		tui.consume("build output line")
+	}
+	tui.toggleDetails()
+	frame := tui.frame(true)
+	if lines := compactFrameLines(frame); lines > 24 {
+		t.Fatalf("details frame exceeds terminal height: lines=%d frame=%q", lines, frame)
+	}
+	if !strings.HasPrefix(frame, "[Task]\n") {
+		t.Fatalf("task header was pushed out of details frame: %q", frame)
 	}
 }
 
