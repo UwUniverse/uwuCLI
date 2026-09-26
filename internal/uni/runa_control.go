@@ -80,6 +80,12 @@ func prepareRunaControl(executor, top string) (*runaControlSession, string, erro
 
 func resolveExecutorPath(executor, top string) (string, error) {
 	if executor == "runa" {
+		if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
+			prebuiltRuna := filepath.Join(top, "vendor", "uwu-prebuilts", "runa", "runa")
+			if info, err := os.Stat(prebuiltRuna); err == nil && info.Mode()&0111 != 0 {
+				return filepath.Abs(prebuiltRuna)
+			}
+		}
 		builtRuna := filepath.Join(top, "out", "host", "linux-x86", "bin", "runa")
 		if outDir, err := outputDirectory(top); err == nil {
 			builtRuna = filepath.Join(outDir, "host", "linux-x86", "bin", "runa")
