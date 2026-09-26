@@ -160,7 +160,7 @@ func compactMessagesForLocale(chinese bool) compactMessages {
 	if chinese {
 		return compactMessages{
 			header:     "[任务]",
-			taskLabels: map[string]string{"Graph": "构建图", "Kernel": "内核", "Startup": "启动", "Main": "主构建"},
+			taskLabels: map[string]string{"Graph": "构建图", "Main": "主构建"},
 			building:   "编译中",
 			pending:    "等待",
 			failed:     "失败",
@@ -179,7 +179,7 @@ func compactMessagesForLocale(chinese bool) compactMessages {
 	}
 	return compactMessages{
 		header:     "[Task]",
-		taskLabels: map[string]string{"Graph": "Graph", "Kernel": "Kernel", "Startup": "Startup", "Main": "Main"},
+		taskLabels: map[string]string{"Graph": "Graph", "Main": "Main"},
 		building:   "building",
 		pending:    "pending",
 		failed:     "failed",
@@ -207,7 +207,7 @@ func compactChineseLocale() bool {
 }
 
 func newCompactTUI(input, terminal *os.File) *compactTUI {
-	names := []string{"Graph", "Kernel", "Startup", "Main"}
+	names := []string{"Graph", "Main"}
 	messages := compactMessagesForLocale(false)
 	tui := &compactTUI{
 		terminal:  terminal,
@@ -246,10 +246,6 @@ func compactTaskName(phase string) string {
 	switch {
 	case strings.HasPrefix(phase, "graph-analysis"):
 		return "Graph"
-	case strings.HasPrefix(phase, "kernel"):
-		return "Kernel"
-	case strings.HasPrefix(phase, "startup"):
-		return "Startup"
 	case phase == "ninja", phase == "final", strings.HasPrefix(phase, "segment-"):
 		return "Main"
 	default:

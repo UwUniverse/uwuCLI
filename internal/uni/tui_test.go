@@ -4,7 +4,6 @@
 package uni
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -116,11 +115,11 @@ func TestCompactDisplayLineIsBoundedForRedraw(t *testing.T) {
 
 func TestCompactTUITracksPhaseProgressAndTelemetry(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
-	tui.phaseStarted("startup", 9)
+	tui.phaseStarted("ninja", 9)
 	tui.consume("[ 79% 15175/19054] //module:target r8 [common]")
 	tui.updateTelemetry(TelemetrySample{MemoryAvailable: 13 * gibibyte, Linker: 1})
 
-	task := tui.byName["Startup"]
+	task := tui.byName["Main"]
 	if task.status != compactTaskRunning || task.jobs != 9 || task.percent != 79 || task.done != 15175 || task.total != 19054 {
 		t.Fatalf("unexpected task: %+v", *task)
 	}
@@ -130,7 +129,7 @@ func TestCompactTUITracksPhaseProgressAndTelemetry(t *testing.T) {
 	if task.activity != "link=1" || !strings.Contains(tui.taskLine(task), "link=1") {
 		t.Fatalf("active linker is not visible: task=%+v line=%q", *task, tui.taskLine(task))
 	}
-	tui.phaseFinished("startup", nil)
+	tui.phaseFinished("ninja", nil)
 	if task.status != compactTaskDone {
 		t.Fatalf("task status=%v, want done", task.status)
 	}
@@ -172,7 +171,7 @@ func TestCompactTUIDelayedGraphOutputDoesNotStealMainPhase(t *testing.T) {
 	if graph := tui.byName["Graph"]; graph.status != compactTaskDone || graph.logs.len() != 1 {
 		t.Fatalf("graph marker was not retained: %+v", graph)
 	}
-	tui.selected = 3
+	tui.selected = 1
 	tui.toggleDetails()
 	if frame := tui.frame(true); !strings.Contains(frame, "[ 42% 42/100] target") {
 		t.Fatalf("main details are missing: %q", frame)
@@ -183,13 +182,13 @@ func TestCompactTUIDelayedGraphOutputDoesNotStealMainPhase(t *testing.T) {
 	}
 }
 
-func TestCompactTUIFinishPreservesCompletedPhase(t *testing.T) {
+func TestCompactTUIContainsOnlyCurrentBuildPhases(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
-	tui.phaseStarted("kernel", 18)
-	tui.phaseFinished("kernel", nil)
-	tui.finish(errors.New("scheduler failed after kernel"))
-	if status := tui.byName["Kernel"].status; status != compactTaskDone {
-		t.Fatalf("completed kernel status = %v, want done", status)
+	if len(tui.tasks) != 2 || tui.tasks[0].name != "Graph" || tui.tasks[1].name != "Main" {
+		t.Fatalf("unexpected task rows: %+v", tui.tasks)
+	}
+	if compactTaskName("kernel") != "Main" || compactTaskName("startup") != "Main" {
+		t.Fatal("removed phases should not map to dedicated task rows")
 	}
 }
 
@@ -283,14 +282,14 @@ func TestOutputLogPathSortsByTimestamp(t *testing.T) {
 func TestCompactMessagesSupportChineseAndEnglish(t *testing.T) {
 	english := compactMessagesForLocale(false)
 	chinese := compactMessagesForLocale(true)
-	if english.header != "[Task]" || english.taskLabels["Kernel"] != "Kernel" {
+	if english.header != "[Task]" || english.taskLabels["Main"] != "Main" {
 		t.Fatalf("unexpected English messages: %+v", english)
 	}
-	if chinese.header != "[任务]" || chinese.taskLabels["Kernel"] != "内核" || chinese.footer == english.footer {
+	if chinese.header != "[任务]" || chinese.taskLabels["Main"] != "主构建" || chinese.footer == english.footer {
 		t.Fatalf("unexpected Chinese messages: %+v", chinese)
 	}
-	if compactTextWidth(compactPadRight("内核", 9)) != 9 {
-		t.Fatal("Chinese task label is not aligned to terminal columns")
+	if compactTextWidth(compactPadRight("构建图", 9)) != 9 {
+		t.Fatal("Chinese graph label is not aligned to terminal columns")
 	}
 }
 
@@ -389,7 +388,7 @@ func TestCompactTUIRenderDoesNotScrollOnRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "\x1b[8A\x1b[1G") {
+	if !strings.Contains(string(data), "\x1b[6A\x1b[1G") {
 		t.Fatalf("refresh did not return to the previous frame: %q", data)
 	}
 }
@@ -408,7 +407,7 @@ func TestCompactTUIFrameReservesTerminalColumn(t *testing.T) {
 
 func TestCompactTUIRunningTaskUsesSpinner(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
-	tui.phaseStarted("startup", 4)
+	tui.phaseStarted("ninja", 4)
 	first := tui.frame(true)
 	tui.spinnerAt = time.Now().Add(-compactTUISpinnerInterval)
 	tui.animate()
@@ -426,7 +425,7 @@ func TestCompactTUIRunningTaskUsesSpinner(t *testing.T) {
 
 func TestCompactTUIAnimationIsRateLimited(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
-	tui.phaseStarted("startup", 4)
+	tui.phaseStarted("ninja", 4)
 	tui.frame(true)
 
 	spinner := tui.spinner
