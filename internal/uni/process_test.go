@@ -101,6 +101,27 @@ func TestPhasedNinjaExecutor(t *testing.T) {
 	}
 }
 
+func TestDefaultNinjaExecutorPrefersAvailableRunaAndPreservesExplicitChoice(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested string
+		runaReady bool
+		want      string
+	}{
+		{name: "bundled Runa", runaReady: true, want: "runa"},
+		{name: "normal Soong default without Runa", want: ""},
+		{name: "explicit Siso", requested: "siso", runaReady: true, want: "siso"},
+		{name: "explicit Ninja", requested: "ninja", runaReady: true, want: "ninja"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := defaultNinjaExecutor(test.requested, test.runaReady); got != test.want {
+				t.Fatalf("defaultNinjaExecutor(%q, %t) = %q, want %q", test.requested, test.runaReady, got, test.want)
+			}
+		})
+	}
+}
+
 func TestPreferLocalNinjaOnMemoryConstrainedHost(t *testing.T) {
 	if !preferLocalNinja("", MemorySnapshot{Total: 32 * gibibyte}) {
 		t.Fatal("default executor should use local Ninja on a 32 GiB host")

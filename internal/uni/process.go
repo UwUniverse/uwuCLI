@@ -54,6 +54,16 @@ func phasedNinjaExecutor(requested string) string {
 	return requested
 }
 
+func defaultNinjaExecutor(requested string, runaAvailable bool) string {
+	if requested != "" {
+		return requested
+	}
+	if runaAvailable {
+		return "runa"
+	}
+	return ""
+}
+
 func preferLocalNinja(requested string, snapshot MemorySnapshot) bool {
 	return strings.TrimSpace(requested) == "" && snapshot.Total > 0 && snapshot.Total < 48*gibibyte
 }
@@ -144,13 +154,20 @@ func rustCodegenUnitsForPool(environment []string) int {
 }
 
 func newCommandRunner(ctx context.Context, top string, keyValues []string) (*commandRunner, error) {
+	baseEnv := overrideEnvironment(os.Environ(), keyValues...)
+	requestedNinja, _ := environmentValue(baseEnv, "SOONG_NINJA")
+	if requestedNinja == "" {
+		// Prefer the bundled Runa Ninja-compatible executor for Uni builds.
+		// Keep Soong's normal default when this host has no usable Runa binary.
+		_, err := resolveExecutorPath("runa", top)
+		requestedNinja = defaultNinjaExecutor(requestedNinja, err == nil)
+	}
 	runner := &commandRunner{
 		top:            top,
-		requestedNinja: os.Getenv("SOONG_NINJA"),
-		baseEnv:        os.Environ(),
+		requestedNinja: requestedNinja,
+		baseEnv:        baseEnv,
 		soongUIPath:    filepath.Join(top, "build", "soong", "soong_ui.bash"),
 	}
-	runner.baseEnv = overrideEnvironment(runner.baseEnv, keyValues...)
 	runner.phasedNinja = phasedNinjaExecutor(runner.requestedNinja)
 	outDir, err := outputDirectory(top)
 	if err != nil {
