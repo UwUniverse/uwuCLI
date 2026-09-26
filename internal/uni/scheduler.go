@@ -414,7 +414,10 @@ func Run(ctx context.Context, options Options) error {
 		fmt.Printf("uni: signing check passed: %s\n", result.SignedOTA)
 		return nil
 	}
+	stepStarted := time.Now()
+	fmt.Println("uni: startup: checking for leftover build processes")
 	startupCleanup := terminateResidualBuildProcesses(outDir)
+	fmt.Printf("uni: startup: process check finished in %s\n", time.Since(stepStarted).Round(time.Millisecond))
 	report.event("process_cleanup when=start found=%d term_sent=%d kill_sent=%d remaining=%d",
 		startupCleanup.Found, startupCleanup.TermSent, startupCleanup.KillSent, startupCleanup.Remaining)
 	if startupCleanup.Remaining > 0 {
@@ -437,10 +440,13 @@ func Run(ctx context.Context, options Options) error {
 
 	stateDir := filepath.Join(outDir, "uni", product)
 	statePath := filepath.Join(stateDir, "state.json")
+	stepStarted = time.Now()
+	fmt.Println("uni: startup: preparing build executor and environment")
 	runner, err := newCommandRunner(ctx, top, options.KeyValues)
 	if err != nil {
 		return err
 	}
+	fmt.Printf("uni: startup: executor preparation finished in %s\n", time.Since(stepStarted).Round(time.Millisecond))
 	defer func() {
 		cleanup := terminateResidualBuildProcesses(outDir)
 		report.event("process_cleanup when=finish found=%d term_sent=%d kill_sent=%d remaining=%d",
@@ -475,9 +481,12 @@ func Run(ctx context.Context, options Options) error {
 		fmt.Printf("uni: assume existing unlogged outputs; rebuild API validation outputs\n")
 	}
 	report.event("recovery trust_output=%t assume_existing=%t", options.TrustOutput, options.AssumeExisting)
+	stepStarted = time.Now()
+	fmt.Println("uni: startup: checking Ninja recovery state")
 	if err := prepareNinjaState(outDir, options.TrustOutput); err != nil {
 		return fmt.Errorf("prepare Ninja recovery state: %w", err)
 	}
+	fmt.Printf("uni: startup: Ninja recovery check finished in %s\n", time.Since(stepStarted).Round(time.Millisecond))
 	report.event("resources cgroup=%t ccache=%t compiler_check_auto=%t depend_mode_auto=%t fileclone_auto=%t ccache_max_size_auto=%q",
 		runner.useCgroup, runner.useCcache,
 		runner.autoCcacheCompilerCheck, runner.autoCcacheDepend,
@@ -494,6 +503,8 @@ func Run(ctx context.Context, options Options) error {
 	variant := os.Getenv("TARGET_BUILD_VARIANT")
 	var state State
 	var reused bool
+	stepStarted = time.Now()
+	fmt.Println("uni: startup: checking whether the prepared graph can be reused")
 	if options.ForceReuse {
 		state, reused, err = ForceReuseState(statePath, top, outDir, product, release, variant, options)
 	} else {
@@ -502,6 +513,7 @@ func Run(ctx context.Context, options Options) error {
 	if err != nil {
 		return fmt.Errorf("reuse prepared graph: %w", err)
 	}
+	fmt.Printf("uni: startup: graph reuse check finished in %s (reused=%t)\n", time.Since(stepStarted).Round(time.Millisecond), reused)
 	graphArgs := prepareArgs(options, jobs)
 	if reused {
 		fmt.Printf("uni: reuse graph\n")

@@ -46,6 +46,16 @@ func TestParseCompactProgress(t *testing.T) {
 	}
 }
 
+func TestCompactTUIReflectsRuntimeParallelismChanges(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	tui.phaseStarted("ninja", 18)
+	tui.updateParallelism(21)
+	frame := tui.frame(true)
+	if !strings.Contains(frame, "jobs=21") || strings.Contains(frame, "jobs=18") {
+		t.Fatalf("frame did not show updated parallelism: %q", frame)
+	}
+}
+
 func TestCompactRingIsBoundedAndOrdered(t *testing.T) {
 	ring := newCompactRing(3)
 	for _, line := range []string{"one", "two", "three", "four"} {

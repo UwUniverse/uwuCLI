@@ -13,22 +13,75 @@ import (
 
 func TestMemoryRetryJobs(t *testing.T) {
 	for _, tt := range []struct {
-		err, ctxErr         error
-		jobs, retries, want int
-		retry               bool
+		err, ctxErr error
+		jobs, want  int
+		retry       bool
 	}{
-		{errMemoryPressure, nil, 18, 0, 12, true},
-		{errMemoryPressure, nil, 12, 1, 8, true},
-		{errMemoryPressure, nil, 8, 2, 8, false},
-		{errMemoryPressure, nil, 1, 0, 1, false},
-		{errMemoryPressure, context.Canceled, 18, 0, 18, false},
-		{errors.New("compile failed"), nil, 18, 0, 18, false},
-		{nil, nil, 18, 0, 18, false},
+		{errMemoryPressure, nil, 18, 12, true},
+		{errMemoryPressure, nil, 12, 8, true},
+		{errMemoryPressure, nil, 8, 5, true},
+		{errMemoryPressure, nil, 1, 1, true},
+		{errMemoryPressure, context.Canceled, 18, 18, false},
+		{errors.New("compile failed"), nil, 18, 18, false},
+		{nil, nil, 18, 18, false},
 	} {
-		jobs, retry := memoryRetryJobs(tt.err, tt.ctxErr, tt.jobs, tt.retries)
+		jobs, retry := memoryRetryJobs(tt.err, tt.ctxErr, tt.jobs)
 		if jobs != tt.want || retry != tt.retry {
 			t.Fatalf("%+v: got %d, %t", tt, jobs, retry)
 		}
+	}
+}
+
+func TestRunaParallelismRampRaisesGraduallyAndStopsAtTwoPointFiveTimesInferredJobs(t *testing.T) {
+	start := time.Unix(100, 0)
+	memory := MemorySnapshot{Total: 32 * gibibyte, Available: 20 * gibibyte}
+	var ramp runaParallelismRamp
+	if jobs, ceiling, raised := ramp.observe(start, memory, 0, 18, 18); raised || jobs != 18 || ceiling != 45 {
+		t.Fatalf("initial ramp observation = %d/%d/%t, want 18/45/false", jobs, ceiling, raised)
+	}
+	if jobs, _, raised := ramp.observe(start.Add(runaParallelismRampInterval-time.Second), memory, 0, 18, 18); raised || jobs != 18 {
+		t.Fatalf("early ramp observation = %d/%t, want 18/false", jobs, raised)
+	}
+	jobs, ceiling, raised := ramp.observe(start.Add(runaParallelismRampInterval), memory, 0, 18, 18)
+	if !raised || jobs != 21 || ceiling != 45 {
+		t.Fatalf("first ramp = %d/%d/%t, want 21/45/true", jobs, ceiling, raised)
+	}
+	now := start.Add(10 * runaParallelismRampInterval)
+	for jobs < ceiling {
+		var increase bool
+		jobs, ceiling, increase = ramp.observe(now, memory, 0, jobs, 18)
+		if !increase && jobs < ceiling {
+			t.Fatalf("ramp stalled below ceiling at %d", jobs)
+		}
+		now = now.Add(runaParallelismRampInterval)
+	}
+	if jobs != 45 {
+		t.Fatalf("ramp exceeded or missed ceiling: got %d, want 45", jobs)
+	}
+	if next, gotCeiling, increase := ramp.observe(now.Add(runaParallelismRampInterval), memory, 0, jobs, 18); increase || next != 45 || gotCeiling != 45 {
+		t.Fatalf("at ceiling ramp = %d/%d/%t, want 45/45/false", next, gotCeiling, increase)
+	}
+	if ceiling := runaParallelismCeiling(17); ceiling != 42 {
+		t.Fatalf("odd inferred job ceiling = %d, want 42", ceiling)
+	}
+}
+
+func TestRunaParallelismRampRequiresHealthyMemoryAndPSI(t *testing.T) {
+	start := time.Unix(100, 0)
+	var ramp runaParallelismRamp
+	healthy := MemorySnapshot{Total: 32 * gibibyte, Available: 20 * gibibyte}
+	if jobs, _, raised := ramp.observe(start, healthy, 0, 18, 18); raised || jobs != 18 {
+		t.Fatal("ramp increased without a sustained healthy interval")
+	}
+	pressured := MemorySnapshot{Total: 32 * gibibyte, Available: 5 * gibibyte}
+	if jobs, _, raised := ramp.observe(start.Add(runaParallelismRampInterval), pressured, 0, 18, 18); raised || jobs != 18 {
+		t.Fatal("ramp increased with limited available memory")
+	}
+	if jobs, _, raised := ramp.observe(start.Add(2*runaParallelismRampInterval), healthy, runaParallelismRampMaxPSI, 18, 18); raised || jobs != 18 {
+		t.Fatal("ramp increased with high memory PSI")
+	}
+	if jobs, _, raised := ramp.observe(start.Add(3*runaParallelismRampInterval), healthy, 0, 18, 18); raised || jobs != 18 {
+		t.Fatal("ramp reused an old healthy interval after pressure")
 	}
 }
 

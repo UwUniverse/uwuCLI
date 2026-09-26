@@ -223,6 +223,48 @@ func (runner *commandRunner) runUnmanagedReported(ctx context.Context, report *d
 }
 
 func (runner *commandRunner) runReportedAttempt(ctx context.Context, report *debugReport, summary *buildSummary, name, mode, phase, statePath string, args []string, maxJobs, memoryRetries int, managed bool) (SegmentSample, error) {
+	var runaSession *runaControlSession
+	configuredUniNinja, explicitUniNinja := environmentValue(runner.baseEnv, "UNI_NINJA_BIN")
+	explicitUniNinja = explicitUniNinja && configuredUniNinja != ""
+	runaEligible := mode == "--uni-ninja-mode" &&
+		(runner.forceLocalNinja ||
+			(runner.requestedNinja != "" && !strings.EqualFold(runner.requestedNinja, "siso")) ||
+			(explicitUniNinja && !strings.EqualFold(runner.requestedNinja, "siso")))
+	if runaEligible {
+		executor := runner.phasedNinja
+		if configuredUniNinja != "" && runner.assumeExistingNinja == "" {
+			executor = configuredUniNinja
+		}
+		session, reason, setupErr := prepareRunaControl(executor, runner.top)
+		if setupErr != nil {
+			fmt.Fprintf(os.Stderr, "uni: cannot prepare Runa runtime control: %v\n", setupErr)
+			if report != nil {
+				report.event("runa_control result=unavailable error=%q", setupErr)
+			}
+		} else if session == nil {
+			fmt.Printf("uni: Runa runtime control unavailable (%s); using whole-build memory recovery\n", reason)
+			if report != nil {
+				report.event("runa_control result=unavailable reason=%q", reason)
+			}
+		} else {
+			runaSession = session
+			defer runaSession.close()
+			fmt.Printf("uni: Runa runtime control enabled: executor=%s socket=%s\n", runaSession.binary, runaSession.socket)
+			ceiling := runaParallelismCeiling(maxJobs)
+			fmt.Printf("uni: Runa adaptive parallelism: initial -j%d, ceiling -j%d\n", maxJobs, ceiling)
+			if report != nil {
+				report.event("runa_control result=ready executor=%q", runaSession.binary)
+				report.event("runa_parallelism policy=healthy-headroom inferred_jobs=%d ceiling=%d step=%d interval=%s min_available=max(6GiB,total/5) max_memory_psi_full_avg10=%.1f",
+					maxJobs, ceiling, max(1, maxJobs/6), runaParallelismRampInterval, runaParallelismRampMaxPSI)
+			}
+		}
+	} else if mode == "--uni-ninja-mode" {
+		reason := "the selected executor is not an explicit local Ninja binary"
+		fmt.Printf("uni: Runa runtime control not selected (%s); using whole-build memory recovery\n", reason)
+		if report != nil {
+			report.event("runa_control result=not_selected reason=%q", reason)
+		}
+	}
 	tui := compactTUIFromContext(ctx)
 	if tui != nil {
 		tui.phaseStarted(name, maxJobs)
@@ -241,7 +283,7 @@ func (runner *commandRunner) runReportedAttempt(ctx context.Context, report *deb
 	if tui != nil {
 		liveTelemetrySink = tui.updateTelemetry
 	}
-	sample, err := runner.runWithTelemetry(ctx, mode, phase, statePath, args, maxJobs, memoryRetries, managed, telemetrySink, liveTelemetrySink)
+	sample, err := runner.runWithTelemetry(ctx, mode, phase, statePath, args, maxJobs, memoryRetries, managed, runaSession, report, telemetrySink, liveTelemetrySink)
 	sample.Phase = name
 	sample.Duration = time.Since(started)
 	summary.add(sample)
@@ -256,10 +298,10 @@ func (runner *commandRunner) runReportedAttempt(ctx context.Context, report *deb
 	if tui != nil {
 		tui.phaseFinished(name, err)
 	}
-	if managed {
-		if jobs, retry := memoryRetryJobs(err, ctx.Err(), maxJobs, memoryRetries); retry {
+	if runaSession == nil && (managed || mode == "--uni-ninja-mode") {
+		if jobs, retry := memoryRetryJobs(err, ctx.Err(), maxJobs); retry {
 			nextRetry := memoryRetries + 1
-			fmt.Printf("uni: sustained memory pressure; waiting before -j%d retry %d/2\n", jobs, nextRetry)
+			fmt.Printf("uni: sustained memory pressure; waiting before -j%d retry %d\n", jobs, nextRetry)
 			if report != nil {
 				report.event("memory_recovery_wait retry=%d jobs=%d timeout=%s", nextRetry, jobs, memoryRecoveryTimeout)
 			}
@@ -275,7 +317,7 @@ func (runner *commandRunner) runReportedAttempt(ctx context.Context, report *deb
 			}
 			fmt.Printf("uni: memory pressure recovered after %s; resuming completed outputs\n", waited.Round(time.Second))
 			return runner.runReportedAttempt(ctx, report, summary, name, mode, phase, statePath,
-				replaceParallelArgs(args, jobs), jobs, nextRetry, true)
+				replaceParallelArgs(args, jobs), jobs, nextRetry, managed)
 		}
 	}
 	return sample, err
@@ -295,10 +337,11 @@ func (runner *commandRunner) probeCgroup(ctx context.Context) bool {
 }
 
 func (runner *commandRunner) run(ctx context.Context, mode, phase, statePath string, args []string, maxJobs int) (SegmentSample, error) {
-	return runner.runWithTelemetry(ctx, mode, phase, statePath, args, maxJobs, 0, true, nil, nil)
+	return runner.runWithTelemetry(ctx, mode, phase, statePath, args, maxJobs, 0, true, nil, nil, nil, nil)
 }
 
-func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, statePath string, args []string, maxJobs, memoryRetries int, managed bool, telemetrySink, liveTelemetrySink func(TelemetrySample)) (SegmentSample, error) {
+func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, statePath string, args []string, maxJobs, memoryRetries int, managed bool, runaSession *runaControlSession, report *debugReport, telemetrySink, liveTelemetrySink func(TelemetrySample)) (SegmentSample, error) {
+	tui := compactTUIFromContext(ctx)
 	snapshot, err := ReadMemorySnapshot()
 	var telemetryWarnings []string
 	if err != nil {
@@ -361,7 +404,18 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 	if !managed && mode == "--uni-ninja-mode" && runner.forceLocalNinja {
 		forceNinja = true
 	}
-	if forceNinja {
+	if runaSession != nil {
+		// Soong selects the Ninja implementation by a fixed enum. The wrapper
+		// path itself is supplied through UNI_NINJA_BIN, which is honored only
+		// for uni Ninja invocations.
+		overrides = append(overrides,
+			"SOONG_NINJA=ninja",
+			"NO_ABFS=true",
+			"UNI_NINJA_BIN="+runaSession.wrapper)
+		if runner.assumeExistingNinja != "" {
+			overrides = append(overrides, "UNI_ASSUME_EXISTING=true")
+		}
+	} else if forceNinja {
 		overrides = append(overrides, "SOONG_NINJA="+runner.phasedNinja)
 		if runner.phasedNinja == "ninja" {
 			overrides = append(overrides, "NO_ABFS=true")
@@ -471,6 +525,16 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		var pressure memoryPressureGuard
+		var recovery memoryRecoveryGuard
+		var parallelismRamp runaParallelismRamp
+		recovering := false
+		parallelismRaising := runaSession != nil
+		var episodes uint64
+		effectiveJobs := maxJobs
+		recoveryStarted := time.Time{}
+		recoveryDeadline := time.Time{}
+		nextRecoveryLog := time.Time{}
+		successfulAtRecovery := uint64(0)
 		for {
 			select {
 			case <-ctx.Done():
@@ -482,14 +546,81 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 				}
 				return
 			case now := <-ticker.C:
-				if !managed || mode != "--uni-ninja-mode" {
+				if mode != "--uni-ninja-mode" {
 					continue
 				}
 				memory, memoryErr := ReadMemorySnapshot()
 				psi, psiErr := readMemoryPSI()
 				if memoryErr != nil || psiErr != nil {
-					pressure = memoryPressureGuard{}
+					if !recovering {
+						pressure = memoryPressureGuard{}
+						parallelismRamp.reset()
+					}
 					continue
+				}
+				if runaSession != nil {
+					if recovering {
+						if recovery.observe(memory, psi.full.avg10) {
+							status, statusErr := runaSession.status(ctx)
+							if statusErr != nil {
+								fmt.Fprintf(os.Stderr, "uni: Runa status unavailable after recovery: %v\n", statusErr)
+								if report != nil {
+									report.event("runa_recovery_status error=%q", statusErr)
+								}
+							} else {
+								completed := uint64(0)
+								if status.SuccessfulActions >= successfulAtRecovery {
+									completed = status.SuccessfulActions - successfulAtRecovery
+								}
+								fmt.Printf("uni: Runa recovery episode %d: memory healthy after %s; %d action(s) completed while recovering, running=%d retrying=%d jobs=%d/%d\n",
+									episodes, now.Sub(recoveryStarted).Round(time.Second), completed,
+									status.Running, status.Retrying, status.Parallelism, status.OriginalParallelism)
+								if report != nil {
+									report.event("runa_recovery result=healthy episode=%d elapsed=%s completed=%d running=%d retrying=%d jobs=%d original_jobs=%d",
+										episodes, now.Sub(recoveryStarted).Round(time.Millisecond), completed,
+										status.Running, status.Retrying, status.Parallelism, status.OriginalParallelism)
+								}
+							}
+							recovering = false
+							pressure = memoryPressureGuard{}
+							recovery = memoryRecoveryGuard{}
+							parallelismRamp.reset()
+							continue
+						}
+						if !now.Before(recoveryDeadline) {
+							fmt.Printf("uni: Runa recovery episode %d did not restore memory within %s\n",
+								episodes, memoryRecoveryTimeout)
+							if report != nil {
+								report.event("runa_recovery result=timeout episode=%d timeout=%s", episodes, memoryRecoveryTimeout)
+							}
+							recovering = false
+							pressure = memoryPressureGuard{}
+							recovery = memoryRecoveryGuard{}
+							continue
+						}
+						if !now.Before(nextRecoveryLog) {
+							status, statusErr := runaSession.status(ctx)
+							if statusErr != nil {
+								fmt.Fprintf(os.Stderr, "uni: waiting for Runa recovery (%s elapsed); status unavailable: %v\n",
+									now.Sub(recoveryStarted).Round(time.Second), statusErr)
+								if report != nil {
+									report.event("runa_recovery result=waiting elapsed=%s status_error=%q",
+										now.Sub(recoveryStarted).Round(time.Second), statusErr)
+								}
+							} else {
+								fmt.Printf("uni: waiting for Runa recovery (%s elapsed): available=%s, PSI full avg10=%.1f, running=%d retrying=%d completed=%d, jobs=%d/%d\n",
+									now.Sub(recoveryStarted).Round(time.Second), formatBytes(memory.Available), psi.full.avg10,
+									status.Running, status.Retrying, status.SuccessfulActions, status.Parallelism, status.OriginalParallelism)
+								if report != nil {
+									report.event("runa_recovery result=waiting elapsed=%s available=%q psi_full_avg10=%.1f running=%d retrying=%d completed=%d jobs=%d original_jobs=%d",
+										now.Sub(recoveryStarted).Round(time.Second), formatBytes(memory.Available), psi.full.avg10,
+										status.Running, status.Retrying, status.SuccessfulActions, status.Parallelism, status.OriginalParallelism)
+								}
+							}
+							nextRecoveryLog = now.Add(15 * time.Second)
+						}
+						continue
+					}
 				}
 				linkerHeavy := false
 				if memory.Total > 0 && memory.Available < 2*max(3*gibibyte, memory.Total/8) && psi.full.avg10 >= 35 {
@@ -507,9 +638,107 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 					}
 				}
 				if pressure.observe(now, memory, psi.full.avg10, linkerHeavy) {
-					pressureTriggered = true
-					terminateBuildProcessTree(rootIdentity, scopeUnit, runner.outDir)
-					return
+					parallelismRamp.reset()
+					if runaSession == nil {
+						pressureTriggered = true
+						fmt.Printf("uni: sustained memory pressure; stopping the build to save completed Ninja progress\n")
+						terminateBuildProcessTree(rootIdentity, scopeUnit, runner.outDir)
+						return
+					}
+					episodes++
+					status, statusErr := runaSession.status(ctx)
+					if statusErr != nil {
+						pressureTriggered = true
+						fmt.Fprintf(os.Stderr, "uni: Runa control failed during memory pressure: %v; stopping this build\n", statusErr)
+						if report != nil {
+							report.event("runa_pressure result=control-error episode=%d error=%q", episodes, statusErr)
+						}
+						terminateBuildProcessTree(rootIdentity, scopeUnit, runner.outDir)
+						return
+					}
+					if status.Parallelism > 0 {
+						effectiveJobs = status.Parallelism
+					}
+					fmt.Printf("uni: memory pressure episode %d: available=%s, PSI full avg10=%.1f, Runa running=%d retrying=%d completed=%d, jobs=%d/%d\n",
+						episodes, formatBytes(memory.Available), psi.full.avg10,
+						status.Running, status.Retrying, status.SuccessfulActions, effectiveJobs, status.OriginalParallelism)
+					if report != nil {
+						report.event("runa_pressure episode=%d available=%q psi_full_avg10=%.1f running=%d retrying=%d completed=%d jobs=%d original_jobs=%d linker_heavy=%t",
+							episodes, formatBytes(memory.Available), psi.full.avg10, status.Running,
+							status.Retrying, status.SuccessfulActions, effectiveJobs, status.OriginalParallelism, linkerHeavy)
+					}
+					nextJobs := max(1, effectiveJobs*2/3)
+					if nextJobs < effectiveJobs {
+						response, controlErr := runaSession.setParallelism(ctx, nextJobs)
+						if controlErr != nil {
+							pressureTriggered = true
+							fmt.Fprintf(os.Stderr, "uni: Runa could not lower parallelism: %v; stopping this build\n", controlErr)
+							if report != nil {
+								report.event("runa_pressure result=parallelism-error episode=%d error=%q", episodes, controlErr)
+							}
+							terminateBuildProcessTree(rootIdentity, scopeUnit, runner.outDir)
+							return
+						}
+						effectiveJobs = nextJobs
+						if tui != nil {
+							tui.updateParallelism(effectiveJobs)
+						}
+						fmt.Printf("uni: Runa accepted lower parallelism: %d -> %d (%s)\n", status.Parallelism, effectiveJobs, response)
+						if report != nil {
+							report.event("runa_pressure parallelism=%d response=%q", effectiveJobs, response)
+						}
+					} else {
+						fmt.Printf("uni: Runa is already at minimum parallelism (-j%d)\n", effectiveJobs)
+					}
+					response, controlErr := runaSession.cancelActionForRetry(ctx)
+					if controlErr != nil {
+						pressureTriggered = true
+						fmt.Fprintf(os.Stderr, "uni: Runa could not retry a task: %v; stopping this build\n", controlErr)
+						if report != nil {
+							report.event("runa_pressure result=retry-error episode=%d error=%q", episodes, controlErr)
+						}
+						terminateBuildProcessTree(rootIdentity, scopeUnit, runner.outDir)
+						return
+					}
+					if strings.HasPrefix(response, "reject reason=no_retryable_action") {
+						fmt.Printf("uni: no running edge opted into retry; Runa will drain current work at -j%d\n", effectiveJobs)
+					} else {
+						fmt.Printf("uni: Runa accepted single-action retry: %s\n", response)
+					}
+					if report != nil {
+						report.event("runa_pressure retry_response=%q", response)
+					}
+					successfulAtRecovery = status.SuccessfulActions
+					recovering = true
+					recovery = memoryRecoveryGuard{}
+					recoveryStarted = now
+					recoveryDeadline = now.Add(memoryRecoveryTimeout)
+					nextRecoveryLog = now.Add(15 * time.Second)
+				}
+				if parallelismRaising {
+					nextJobs, ceiling, increase := parallelismRamp.observe(now, memory, psi.full.avg10, effectiveJobs, maxJobs)
+					if increase {
+						response, controlErr := runaSession.setParallelism(ctx, nextJobs)
+						if controlErr != nil {
+							parallelismRaising = false
+							fmt.Fprintf(os.Stderr, "uni: Runa could not raise parallelism to %d; continuing at -j%d: %v\n", nextJobs, effectiveJobs, controlErr)
+							if report != nil {
+								report.event("runa_parallelism result=raise-error requested=%d current=%d ceiling=%d error=%q", nextJobs, effectiveJobs, ceiling, controlErr)
+							}
+						} else {
+							previousJobs := effectiveJobs
+							effectiveJobs = nextJobs
+							if tui != nil {
+								tui.updateParallelism(effectiveJobs)
+							}
+							fmt.Printf("uni: Runa increased parallelism: %d -> %d (ceiling=%d, available=%s, memory PSI full avg10=%.1f)\n",
+								previousJobs, effectiveJobs, ceiling, formatBytes(memory.Available), psi.full.avg10)
+							if report != nil {
+								report.event("runa_parallelism result=increased previous=%d current=%d ceiling=%d available=%q psi_full_avg10=%.1f response=%q",
+									previousJobs, effectiveJobs, ceiling, formatBytes(memory.Available), psi.full.avg10, response)
+							}
+						}
+					}
 				}
 			}
 		}

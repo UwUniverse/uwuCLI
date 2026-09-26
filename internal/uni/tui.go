@@ -303,6 +303,18 @@ func (tui *compactTUI) updateTelemetry(sample TelemetrySample) {
 	tui.dirty = true
 }
 
+func (tui *compactTUI) updateParallelism(jobs int) {
+	if jobs < 1 {
+		return
+	}
+	tui.mu.Lock()
+	defer tui.mu.Unlock()
+	if tui.active != nil && tui.active.status == compactTaskRunning {
+		tui.active.jobs = jobs
+		tui.dirty = true
+	}
+}
+
 func compactActivity(sample TelemetrySample) string {
 	switch {
 	case sample.R8 > 0:

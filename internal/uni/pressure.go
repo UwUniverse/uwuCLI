@@ -14,14 +14,64 @@ import (
 var errMemoryPressure = errors.New("sustained memory pressure: build stopped and recovery state saved")
 
 const (
-	memoryRecoveryPSI          = 10.0
-	memoryRecoverySamples      = 3
-	memoryRecoveryPollInterval = time.Second
-	memoryRecoveryTimeout      = 45 * time.Second
+	memoryRecoveryPSI           = 10.0
+	memoryRecoverySamples       = 3
+	memoryRecoveryPollInterval  = time.Second
+	memoryRecoveryTimeout       = 45 * time.Second
+	runaParallelismRampInterval = 15 * time.Second
+	runaParallelismRampMaxPSI   = 10.0
 )
 
-func memoryRetryJobs(err, contextErr error, jobs, retries int) (int, bool) {
-	if !errors.Is(err, errMemoryPressure) || contextErr != nil || jobs <= 1 || retries >= 2 {
+type runaParallelismRamp struct {
+	healthySince time.Time
+	lastIncrease time.Time
+}
+
+func runaParallelismCeiling(inferredJobs int) int {
+	if inferredJobs < 1 {
+		return 0
+	}
+	maxInt := int(^uint(0) >> 1)
+	if inferredJobs > maxInt/5 {
+		return maxInt
+	}
+	return inferredJobs * 5 / 2
+}
+
+func (ramp *runaParallelismRamp) observe(now time.Time, memory MemorySnapshot, fullAvg10 float64, currentJobs, inferredJobs int) (int, int, bool) {
+	ceiling := runaParallelismCeiling(inferredJobs)
+	minimumAvailable := max(6*gibibyte, memory.Total/5)
+	if memory.Total <= 0 || memory.Available < minimumAvailable || fullAvg10 >= runaParallelismRampMaxPSI ||
+		currentJobs < 1 || inferredJobs < 1 || currentJobs >= ceiling {
+		ramp.healthySince = time.Time{}
+		return currentJobs, ceiling, false
+	}
+	if ramp.healthySince.IsZero() {
+		ramp.healthySince = now
+		return currentJobs, ceiling, false
+	}
+	if now.Sub(ramp.healthySince) < runaParallelismRampInterval ||
+		(!ramp.lastIncrease.IsZero() && now.Sub(ramp.lastIncrease) < runaParallelismRampInterval) {
+		return currentJobs, ceiling, false
+	}
+	step := max(1, inferredJobs/6)
+	nextJobs := ceiling
+	if step < ceiling-currentJobs {
+		nextJobs = currentJobs + step
+	}
+	if nextJobs <= currentJobs {
+		return currentJobs, ceiling, false
+	}
+	ramp.lastIncrease = now
+	return nextJobs, ceiling, true
+}
+
+func (ramp *runaParallelismRamp) reset() {
+	ramp.healthySince = time.Time{}
+}
+
+func memoryRetryJobs(err, contextErr error, jobs int) (int, bool) {
+	if !errors.Is(err, errMemoryPressure) || contextErr != nil || jobs < 1 {
 		return jobs, false
 	}
 	return max(1, jobs*2/3), true

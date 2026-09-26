@@ -154,61 +154,6 @@ func (state State) Validate(sourceRoot, outDir, product string) error {
 	return nil
 }
 
-func sourceGraphFile(relative, name string) bool {
-	if name == "Android.bp" || name == "Blueprints" || strings.HasSuffix(name, ".mk") {
-		return true
-	}
-	return strings.HasPrefix(relative, "build/soong/") ||
-		strings.HasPrefix(relative, "vendor/uwu/build/soong/") ||
-		strings.HasPrefix(relative, "build/blueprint/")
-}
-
-func sourceGraphFingerprint(sourceRoot, outDir string) (string, int64, error) {
-	hash := sha256.New()
-	fmt.Fprintf(hash, "version\x00%d\n", sourceFingerprintVersion)
-	var newest int64
-	outDir = filepath.Clean(outDir)
-	err := filepath.WalkDir(sourceRoot, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		clean := filepath.Clean(path)
-		if entry.IsDir() {
-			if clean == outDir || entry.Name() == ".repo" || entry.Name() == ".git" ||
-				entry.Name() == ".codegraph" {
-				return filepath.SkipDir
-			}
-			info, err := entry.Info()
-			if err != nil {
-				return err
-			}
-			relative, err := filepath.Rel(sourceRoot, clean)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(hash, "dir\x00%s\x00%d\n", filepath.ToSlash(relative), info.ModTime().UnixNano())
-			return nil
-		}
-		relative, err := filepath.Rel(sourceRoot, clean)
-		if err != nil || !sourceGraphFile(filepath.ToSlash(relative), entry.Name()) {
-			return err
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(hash, "%s\x00%d\x00%d\n", filepath.ToSlash(relative), info.Size(), info.ModTime().UnixNano())
-		if info.ModTime().UnixNano() > newest {
-			newest = info.ModTime().UnixNano()
-		}
-		return nil
-	})
-	if err != nil {
-		return "", 0, err
-	}
-	return hex.EncodeToString(hash.Sum(nil)), newest, nil
-}
-
 func (state State) validateReusableGraph(sourceRoot, outDir, product string) (int64, error) {
 	if state.Version != stateVersion {
 		return 0, fmt.Errorf("unsupported state version %d", state.Version)
@@ -264,7 +209,7 @@ func ReuseState(path, sourceRoot, outDir, product, release, variant string, opti
 	if err != nil || state.TargetRelease != release || state.BuildVariant != variant {
 		return State{}, false, nil
 	}
-	fingerprint, newest, err := sourceGraphFingerprint(sourceRoot, outDir)
+	fingerprint, newest, err := sourceGraphFingerprintWithProgress(sourceRoot, outDir, true)
 	if err != nil {
 		return State{}, false, err
 	}
@@ -348,7 +293,7 @@ func ForceReuseState(path, sourceRoot, outDir, product, release, variant string,
 }
 
 func RecordSourceFingerprint(path, sourceRoot, outDir string, state State) (State, error) {
-	fingerprint, _, err := sourceGraphFingerprint(sourceRoot, outDir)
+	fingerprint, _, err := sourceGraphFingerprintWithProgress(sourceRoot, outDir, true)
 	if err != nil {
 		return State{}, err
 	}
