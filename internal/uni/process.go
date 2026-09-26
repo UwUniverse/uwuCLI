@@ -527,6 +527,7 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 		var pressure memoryPressureGuard
 		var recovery memoryRecoveryGuard
 		var parallelismRamp runaParallelismRamp
+		var swapSampler swapRateSampler
 		recovering := false
 		parallelismRaising := runaSession != nil
 		var episodes uint64
@@ -558,6 +559,7 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 					}
 					continue
 				}
+				swap := swapSampler.observe(now, memory)
 				if runaSession != nil {
 					if recovering {
 						if recovery.observe(memory, psi.full.avg10) {
@@ -637,7 +639,7 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 						}
 					}
 				}
-				if pressure.observe(now, memory, psi.full.avg10, linkerHeavy) {
+				if pressure.observe(now, memory, psi.full.avg10, swap, linkerHeavy) {
 					parallelismRamp.reset()
 					if runaSession == nil {
 						pressureTriggered = true
@@ -659,12 +661,12 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 					if status.Parallelism > 0 {
 						effectiveJobs = status.Parallelism
 					}
-					fmt.Printf("uni: memory pressure episode %d: available=%s, PSI full avg10=%.1f, Runa running=%d retrying=%d completed=%d, jobs=%d/%d\n",
-						episodes, formatBytes(memory.Available), psi.full.avg10,
+					fmt.Printf("uni: memory pressure episode %d: available=%s, PSI full avg10=%.1f, swap in/out=%.1f/%.1f MiB/min, Runa running=%d retrying=%d completed=%d, jobs=%d/%d\n",
+						episodes, formatBytes(memory.Available), psi.full.avg10, swap.inBytesPerSecond*60/(1024*1024), swap.outBytesPerSecond*60/(1024*1024),
 						status.Running, status.Retrying, status.SuccessfulActions, effectiveJobs, status.OriginalParallelism)
 					if report != nil {
-						report.event("runa_pressure episode=%d available=%q psi_full_avg10=%.1f running=%d retrying=%d completed=%d jobs=%d original_jobs=%d linker_heavy=%t",
-							episodes, formatBytes(memory.Available), psi.full.avg10, status.Running,
+						report.event("runa_pressure episode=%d available=%q psi_full_avg10=%.1f swap_in_mib_min=%.1f swap_out_mib_min=%.1f running=%d retrying=%d completed=%d jobs=%d original_jobs=%d linker_heavy=%t",
+							episodes, formatBytes(memory.Available), psi.full.avg10, swap.inBytesPerSecond*60/(1024*1024), swap.outBytesPerSecond*60/(1024*1024), status.Running,
 							status.Retrying, status.SuccessfulActions, effectiveJobs, status.OriginalParallelism, linkerHeavy)
 					}
 					nextJobs := max(1, effectiveJobs*2/3)
@@ -716,7 +718,7 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 					nextRecoveryLog = now.Add(15 * time.Second)
 				}
 				if parallelismRaising {
-					nextJobs, ceiling, increase := parallelismRamp.observe(now, memory, psi.full.avg10, effectiveJobs, maxJobs)
+					nextJobs, ceiling, increase := parallelismRamp.observe(now, memory, psi.full.avg10, swap, effectiveJobs, maxJobs)
 					if increase {
 						response, controlErr := runaSession.setParallelism(ctx, nextJobs)
 						if controlErr != nil {

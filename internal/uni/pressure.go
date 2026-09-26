@@ -6,6 +6,7 @@ package uni
 import (
 	"context"
 	"errors"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -20,7 +21,44 @@ const (
 	memoryRecoveryTimeout       = 45 * time.Second
 	runaParallelismRampInterval = 15 * time.Second
 	runaParallelismRampMaxPSI   = 10.0
+	runaSwapInPressureRate      = 4 * 1024 * 1024  // 240 MiB/min
+	runaSwapOutPressureRate     = 16 * 1024 * 1024 // 960 MiB/min
 )
+
+type swapRates struct {
+	inBytesPerSecond  float64
+	outBytesPerSecond float64
+}
+
+func (rates swapRates) active() bool {
+	return rates.inBytesPerSecond >= runaSwapInPressureRate || rates.outBytesPerSecond >= runaSwapOutPressureRate
+}
+
+type swapRateSampler struct {
+	previousAt  time.Time
+	previousIn  uint64
+	previousOut uint64
+}
+
+func (sampler *swapRateSampler) observe(now time.Time, memory MemorySnapshot) swapRates {
+	if sampler.previousAt.IsZero() || !now.After(sampler.previousAt) ||
+		memory.SwapInPage < sampler.previousIn || memory.SwapOutPage < sampler.previousOut {
+		sampler.previousAt = now
+		sampler.previousIn = memory.SwapInPage
+		sampler.previousOut = memory.SwapOutPage
+		return swapRates{}
+	}
+	seconds := now.Sub(sampler.previousAt).Seconds()
+	pageSize := float64(os.Getpagesize())
+	rates := swapRates{
+		inBytesPerSecond:  float64(memory.SwapInPage-sampler.previousIn) * pageSize / seconds,
+		outBytesPerSecond: float64(memory.SwapOutPage-sampler.previousOut) * pageSize / seconds,
+	}
+	sampler.previousAt = now
+	sampler.previousIn = memory.SwapInPage
+	sampler.previousOut = memory.SwapOutPage
+	return rates
+}
 
 type runaParallelismRamp struct {
 	healthySince time.Time
@@ -38,10 +76,10 @@ func runaParallelismCeiling(inferredJobs int) int {
 	return inferredJobs * 5 / 2
 }
 
-func (ramp *runaParallelismRamp) observe(now time.Time, memory MemorySnapshot, fullAvg10 float64, currentJobs, inferredJobs int) (int, int, bool) {
+func (ramp *runaParallelismRamp) observe(now time.Time, memory MemorySnapshot, fullAvg10 float64, swap swapRates, currentJobs, inferredJobs int) (int, int, bool) {
 	ceiling := runaParallelismCeiling(inferredJobs)
 	minimumAvailable := max(6*gibibyte, memory.Total/5)
-	if memory.Total <= 0 || memory.Available < minimumAvailable || fullAvg10 >= runaParallelismRampMaxPSI ||
+	if memory.Total <= 0 || memory.Available < minimumAvailable || fullAvg10 >= runaParallelismRampMaxPSI || swap.active() ||
 		currentJobs < 1 || inferredJobs < 1 || currentJobs >= ceiling {
 		ramp.healthySince = time.Time{}
 		return currentJobs, ceiling, false
@@ -81,13 +119,16 @@ type memoryPressureGuard struct {
 	since time.Time
 }
 
-func (guard *memoryPressureGuard) observe(now time.Time, memory MemorySnapshot, fullAvg10 float64, linkerHeavy bool) bool {
+func (guard *memoryPressureGuard) observe(now time.Time, memory MemorySnapshot, fullAvg10 float64, swap swapRates, linkerHeavy bool) bool {
 	if memory.Total <= 0 || memory.Available < 0 {
 		guard.since = time.Time{}
 		return false
 	}
 	reserve := max(3*gibibyte, memory.Total/8)
 	pressured := memory.Available < reserve && fullAvg10 >= 20
+	if memory.Available < memory.Total/3 && fullAvg10 >= runaParallelismRampMaxPSI && swap.active() {
+		pressured = true
+	}
 	if memory.Available < memory.Total/3 && fullAvg10 >= 45 {
 		pressured = true
 	}
