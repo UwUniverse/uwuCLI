@@ -460,8 +460,25 @@ func TestReuseStateChangesTargetAndRestoresBuildDate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != "123\n" {
+	if string(data) != "123" {
 		t.Fatalf("build date was not restored: %q", data)
+	}
+	dateInfo, err := os.Stat(buildDate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstModTime := dateInfo.ModTime()
+	_, reused, err = ReuseState(statePath, directory, outDir, "uwu_test", "cp2a", "userdebug",
+		Options{Targets: []string{"otapackage"}, BuildArgs: []string{"otapackage"}})
+	if err != nil || !reused {
+		t.Fatalf("state was not reused a second time: reused=%t err=%v", reused, err)
+	}
+	dateInfo, err = os.Stat(buildDate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dateInfo.ModTime().Equal(firstModTime) {
+		t.Fatalf("unchanged build date was rewritten: mtime %v -> %v", firstModTime, dateInfo.ModTime())
 	}
 }
 

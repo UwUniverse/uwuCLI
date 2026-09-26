@@ -220,7 +220,9 @@ func ReuseState(path, sourceRoot, outDir, product, release, variant string, opti
 	} else if newest > oldest {
 		return State{}, false, nil
 	}
-	buildDate := []byte(state.BuildDateTime + "\n")
+	// Match Soong's SetupOutDir output exactly; changing this file's mtime
+	// invalidates Ninja edges that depend on the build date.
+	buildDate := []byte(state.BuildDateTime)
 	current, readErr := os.ReadFile(state.BuildDateTimeFile)
 	if readErr != nil || !bytes.Equal(current, buildDate) {
 		if err := os.WriteFile(state.BuildDateTimeFile, buildDate, 0666); err != nil {
