@@ -44,6 +44,7 @@ type Options struct {
 	InitSigningKeys string
 	SignKeys        string
 	SignConfig      string
+	SignPath        string
 	SignCheck       bool
 	Targets         []string
 }
@@ -78,6 +79,7 @@ Options:
   --clean-logs         Remove build logs without touching build outputs
   --init-signing-keys=DIR  Generate release keys once outside the source tree
   --sign-keys=DIR      Build and sign an OTA with keys from DIR
+  --sign-path=DIR      Write signed packages to DIR
   --sign-config=FILE   Read additional APK/APEX signing mappings
   --sign-check         Sign existing target files into an isolated check directory
   --dev                Rebuild the R8 index for this run
@@ -110,6 +112,7 @@ const usageChinese = `用法: uni [选项] [目标...]
   --clean-logs         清理构建日志，不删除编译产物
   --init-signing-keys=目录  在源码树外一次性生成发布密钥
   --sign-keys=目录      使用目录中的密钥构建并签名 OTA
+  --sign-path=目录      指定签名产物目录
   --sign-config=文件    读取额外 APK/APEX 签名映射
   --sign-check         将已有 target-files 签名到隔离检查目录
   --dev                本次重新生成 R8 索引
@@ -182,6 +185,7 @@ func normalizeSingleDashOptions(args []string) []string {
 		"-clean-logs":        "--clean-logs",
 		"-init-signing-keys": "--init-signing-keys",
 		"-sign-keys":         "--sign-keys",
+		"-sign-path":         "--sign-path",
 		"-sign-config":       "--sign-config",
 		"-sign-check":        "--sign-check",
 	}
@@ -310,6 +314,16 @@ func ParseOptions(args []string) (Options, error) {
 			options.SignKeys = value
 			continue
 		}
+		if value, matched, err := customValue(args, &i, "--sign-path"); matched {
+			if err != nil {
+				return Options{}, err
+			}
+			if strings.TrimSpace(value) == "" || strings.HasPrefix(value, "-") {
+				return Options{}, fmt.Errorf("--sign-path requires a directory")
+			}
+			options.SignPath = value
+			continue
+		}
 		if value, matched, err := customValue(args, &i, "--init-signing-keys"); matched {
 			if err != nil {
 				return Options{}, err
@@ -420,6 +434,7 @@ func ParseOptions(args []string) (Options, error) {
 	}
 	if options.InitSigningKeys != "" {
 		if len(options.BuildArgs) > 0 || options.SignKeys != "" || options.SignConfig != "" ||
+			options.SignPath != "" ||
 			options.SignCheck || options.CleanLogs || options.Plan || options.Static ||
 			options.Dev || options.DevAutoSet || options.ForceReuse || options.TrustOutput ||
 			options.AssumeExisting || options.Dist {
@@ -430,6 +445,9 @@ func ParseOptions(args []string) (Options, error) {
 	}
 	if options.SignConfig != "" && options.SignKeys == "" {
 		return Options{}, fmt.Errorf("--sign-config requires --sign-keys")
+	}
+	if options.SignPath != "" && options.SignKeys == "" {
+		return Options{}, fmt.Errorf("--sign-path requires --sign-keys")
 	}
 	if options.CleanLogs && options.SignKeys != "" {
 		return Options{}, fmt.Errorf("--clean-logs cannot be combined with --sign-keys")

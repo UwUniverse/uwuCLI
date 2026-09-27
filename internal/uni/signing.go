@@ -65,12 +65,44 @@ func signingToolPaths(top, outDir string) signingTools {
 	}
 }
 
-func signingOutputDirectory(outDir, product string, check bool) string {
-	directory := filepath.Join(outDir, "release", product)
-	if check {
-		return filepath.Join(directory, "checks", time.Now().Format("20060102-150405"))
+func outDirectoryEmpty(outDir string) (bool, error) {
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return true, nil
+		}
+		return false, err
 	}
-	return directory
+	return len(entries) == 0, nil
+}
+
+func resolveSigningOutputDirectory(top, outDir, signPath string, check bool) (string, error) {
+	directory := strings.TrimSpace(signPath)
+	if directory == "" {
+		empty, err := outDirectoryEmpty(outDir)
+		if err != nil {
+			return "", err
+		}
+		if empty {
+			directory = outDir
+		} else {
+			directory = filepath.Join(top, "Sign.Out")
+		}
+	}
+	if !filepath.IsAbs(directory) {
+		absolute, err := filepath.Abs(directory)
+		if err != nil {
+			return "", err
+		}
+		directory = absolute
+	}
+	if check {
+		directory = filepath.Join(directory, "checks", time.Now().Format("20060102-150405"))
+	}
+	if err := os.MkdirAll(directory, 0777); err != nil {
+		return "", err
+	}
+	return directory, nil
 }
 
 func signingArtifactNames(directory, product string) (string, string) {
@@ -271,6 +303,10 @@ func runSigning(ctx context.Context, top, outDir string, state State, options Op
 	if err != nil {
 		return signingResult{}, err
 	}
-	outputDir := signingOutputDirectory(outDir, state.TargetProduct, options.SignCheck)
+	outputDir, err := resolveSigningOutputDirectory(top, outDir, options.SignPath, options.SignCheck)
+	if err != nil {
+		return signingResult{}, err
+	}
+	fmt.Printf("uni: signing output: %s\n", outputDir)
 	return signTargetFiles(ctx, targetFiles, options.SignKeys, options.SignConfig, outputDir, state.TargetProduct, options.SignCheck, signingToolPaths(top, outDir))
 }

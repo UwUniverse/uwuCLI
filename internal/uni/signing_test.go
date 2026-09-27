@@ -268,10 +268,18 @@ func TestSigningBuildOptions(t *testing.T) {
 		strings.Contains(strings.Join(options.BuildArgs, " "), "otapackage") {
 		t.Fatalf("unexpected signing build options: %+v", options)
 	}
+	options, err = ParseOptions([]string{"--sign-keys", "keys", "--sign-path", "Sign.Out", "-j18", "otapackage"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.SignPath != "Sign.Out" {
+		t.Fatalf("sign path = %q", options.SignPath)
+	}
 	for _, args := range [][]string{
 		{"--sign-keys", "keys", "--trust-output", "otapackage"},
 		{"--sign-check"},
 		{"--sign-keys", "keys", "--sign-check", "otapackage"},
+		{"--sign-path", "Sign.Out", "otapackage"},
 	} {
 		if _, err := ParseOptions(args); err == nil {
 			t.Fatalf("unsafe signing options accepted: %v", args)
@@ -343,5 +351,55 @@ func TestFindTargetFilesRejectsAmbiguousInput(t *testing.T) {
 	}
 	if _, err := findTargetFiles(directory); err == nil {
 		t.Fatal("ambiguous target-files input was accepted")
+	}
+}
+
+func TestResolveSigningOutputDirectory(t *testing.T) {
+	top := t.TempDir()
+	outDir := filepath.Join(top, "out")
+	explicit := filepath.Join(top, "custom-sign")
+	got, err := resolveSigningOutputDirectory(top, outDir, explicit, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != explicit {
+		t.Fatalf("explicit signing directory = %q, want %q", got, explicit)
+	}
+	if info, err := os.Stat(explicit); err != nil || !info.IsDir() {
+		t.Fatalf("explicit signing directory was not created: %v", err)
+	}
+
+	if err := os.Mkdir(outDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	got, err = resolveSigningOutputDirectory(top, outDir, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != outDir {
+		t.Fatalf("empty out signing directory = %q, want %q", got, outDir)
+	}
+
+	if err := os.WriteFile(filepath.Join(outDir, "marker"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = resolveSigningOutputDirectory(top, outDir, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(top, "Sign.Out")
+	if got != want {
+		t.Fatalf("occupied out signing directory = %q, want %q", got, want)
+	}
+	if info, err := os.Stat(want); err != nil || !info.IsDir() {
+		t.Fatalf("Sign.Out was not created: %v", err)
+	}
+
+	got, err = resolveSigningOutputDirectory(top, outDir, explicit, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, filepath.Join(explicit, "checks")) {
+		t.Fatalf("signing check directory = %q, want it under %s", got, explicit)
 	}
 }
