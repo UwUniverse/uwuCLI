@@ -172,7 +172,7 @@ func selectStartupSchedule(packages []string, weights map[string]float64, r8Modu
 }
 
 func constrainStartupForGraph(schedule startupSchedule, earlyKernel string, singleGraph bool) startupSchedule {
-	if !singleGraph {
+	if !singleGraph && earlyKernel == "" {
 		return schedule
 	}
 	result := startupSchedule{}
@@ -551,30 +551,186 @@ func Run(ctx context.Context, options Options) error {
 		return err
 	}
 
-	// For full builds, graph preparation is the only build phase managed by
-	// uni. Once the graph is ready, hand the complete target set to one
-	// unmanaged executor invocation. This keeps uni's analysis memory guard while
-	// avoiding package batching, R8 scheduling, kernel insertion, pool
-	// overrides, and memory-pressure process restarts during the actual build.
-	if options.Dev || options.DevAuto {
+	var packages []string
+	var r8Modules map[string]struct{}
+	var startup startupSchedule
+	var earlyKernel string
+	var batchSize, r8PerBatch, startupJobs int
+	var singleGraph bool
+	loadSchedule := func(label string) error {
+		scheduleSnapshot := memorySnapshotOrWarning(report, label+"-memory")
+		packages = StableShuffle(ProductTargets(state), state.TargetProduct)
+		weights, historySource := historyWeights(top, state, runner)
+		packages = InterleaveLongTargets(packages, weights)
+
 		r8Started := time.Now()
-		r8Modules, r8Source, r8Err := LoadR8ModulesForModeContext(ctx, state,
+		var r8Source string
+		var r8Err error
+		r8Modules, r8Source, r8Err = LoadR8ModulesForModeContext(ctx, state,
 			filepath.Join(stateDir, "r8_modules.json"), r8Mode)
-		report.analysis("r8", r8Source, len(r8Modules), r8Started, r8Err, outDir)
+		report.analysis(label+"-r8", r8Source, len(r8Modules), r8Started, r8Err, outDir)
 		if r8Err != nil {
 			return fmt.Errorf("index R8 modules: %w", r8Err)
 		}
+		packages = InterleaveR8Targets(packages, r8Modules)
+		batchSize = scheduledBatchSize(options, len(packages), scheduleSnapshot)
+		singleGraph = useSingleGraph(packages, batchSize)
+		r8PerBatch = scheduledR8Limit(packages, r8Modules, batchSize)
+
+		var kernelPriority string
+		earlyKernel, kernelPriority, err = EarlyKernelTargets(state.KatiBuildNinja)
+		if err != nil {
+			return fmt.Errorf("inspect early kernel target: %w", err)
+		}
+		runner.kernelJobs = 0
+		if earlyKernel != "" {
+			runner.kernelJobs = nestedKernelJobs(jobs)
+		}
+		startup = selectStartupSchedule(packages, weights, r8Modules, earlyKernel, jobs)
+		startup = constrainStartupForGraph(startup, earlyKernel, singleGraph)
+		startupJobs = startupPhaseJobs(jobs, runner.kernelJobs, earlyKernel != "" && startup.packageCount > 0)
+		runner.sisoPriorityTargets = nil
+		if singleGraph && kernelPriority != "" {
+			runner.sisoPriorityTargets = []string{kernelPriority}
+		}
+		report.event("schedule label=%s packages=%d r8=%d r8_per_batch=%d batch=%d jobs=%d early_kernel=%q kernel_priority=%q single_graph=%t startup_jobs=%d startup_packages=%d startup_history=%d startup_r8=%d startup_non_r8=%d history_source=%q",
+			label, len(packages), R8TargetCount(packages, r8Modules), r8PerBatch, batchSize, jobs,
+			earlyKernel, kernelPriority, singleGraph, startupJobs, startup.packageCount,
+			startup.historyCount, startup.r8Count, startup.nonR8Count, historySource)
+		return nil
+	}
+	if err := loadSchedule("initial"); err != nil {
+		return err
 	}
 	if options.Plan {
-		printSinglePhasePlan(state, jobs)
+		printPlan(state, packages, startup, R8TargetCount(packages, r8Modules), batchSize, startupJobs, jobs, earlyKernel)
 		return nil
 	}
 
-	targets := finalNinjaTargets(state, options, "")
-	fmt.Printf("uni: hand off to build executor, %d target(s), -j%d\n", len(targets), jobs)
-	_, err = runner.runUnmanagedReported(ctx, report, &summary, "build", "--uni-ninja-mode", "only", statePath,
-		phaseArgs(options, targets, jobs, state.Dist), jobs)
+	completed := make(map[string]struct{}, len(packages))
+	startupPending := len(startup.targets) > 0
+	ninjaStarted := false
+	finalRan := false
+	refreshes := 0
+	segmentNumber := 0
+	for !finalRan {
+		if validateErr := state.Validate(top, outDir, product); validateErr != nil {
+			if refreshes >= 1 {
+				return fmt.Errorf("build graph changed repeatedly: %w", validateErr)
+			}
+			fmt.Printf("uni: build graph changed; preparing it again\n")
+			if _, runErr := runner.runReported(ctx, report, &summary, "graph-analysis-refresh", "--uni-prepare-mode", "prepare", statePath, graphArgs, jobs); runErr != nil {
+				return runErr
+			}
+			state, err = LoadState(statePath)
+			if err != nil {
+				return fmt.Errorf("load refreshed graph: %w", err)
+			}
+			state, err = RecordSourceFingerprint(statePath, top, outDir, state)
+			if err != nil {
+				return fmt.Errorf("record refreshed source graph: %w", err)
+			}
+			if err := loadSchedule("refresh"); err != nil {
+				return err
+			}
+			completed = make(map[string]struct{}, len(packages))
+			startupPending = len(startup.targets) > 0
+			refreshes++
+			continue
+		}
+
+		if startupPending {
+			phase := "first"
+			name := "startup"
+			if ninjaStarted {
+				phase = "middle"
+				name = "startup-refresh"
+			}
+			kernelOnly := earlyKernel != "" && startup.packageCount == 0 && len(startup.targets) == 1
+			phaseJobs := startupJobs
+			if kernelOnly {
+				name = "kernel"
+				if ninjaStarted {
+					name = "kernel-refresh"
+				}
+				phaseJobs = jobs
+				fmt.Printf("uni: exclusive kernel phase (%s), -j%d\n", earlyKernel, phaseJobs)
+			} else {
+				fmt.Printf("uni: startup phase, %d target(s), history=%d R8=%d non-R8=%d, -j%d\n",
+					len(startup.targets), startup.historyCount, startup.r8Count, startup.nonR8Count, phaseJobs)
+			}
+			if _, runErr := runner.runReported(ctx, report, &summary, name, "--uni-ninja-mode", phase, statePath,
+				phaseArgs(options, startup.targets, phaseJobs, false), phaseJobs); runErr != nil {
+				return runErr
+			}
+			ninjaStarted = true
+			startupPending = false
+			for _, target := range startup.targets {
+				if target != earlyKernel {
+					completed[target] = struct{}{}
+				}
+			}
+			continue
+		}
+
+		remaining := removeCompleted(append([]string(nil), packages...), completed)
+		if !singleGraph && len(remaining) > 0 {
+			batch := takeBatchWithR8Limit(remaining, batchSize, r8Modules, r8PerBatch)
+			lastSegment := len(batch) == len(remaining)
+			phase := "middle"
+			name := fmt.Sprintf("segment-%d", segmentNumber+1)
+			if !ninjaStarted {
+				phase = "first"
+			}
+			targets := batch
+			dist := false
+			if lastSegment {
+				phase = "final"
+				name = "final"
+				targets = append(targets, finalNinjaTargets(state, options, "")...)
+				dist = state.Dist
+			}
+			segmentNumber++
+			fmt.Printf("uni: segment %d, %d package target(s), %d remaining, R8=%d, -j%d\n",
+				segmentNumber, len(batch), len(remaining)-len(batch), R8TargetCount(batch, r8Modules), jobs)
+			if _, runErr := runner.runReported(ctx, report, &summary, name, "--uni-ninja-mode", phase, statePath,
+				phaseArgs(options, targets, jobs, dist), jobs); runErr != nil {
+				return runErr
+			}
+			ninjaStarted = true
+			for _, target := range batch {
+				completed[target] = struct{}{}
+			}
+			if lastSegment {
+				finalRan = true
+			}
+			continue
+		}
+
+		finalKernel := earlyKernel
+		if ninjaStarted {
+			finalKernel = ""
+		}
+		finalTargets := finalNinjaTargets(state, options, finalKernel)
+		finalPhase := "only"
+		if ninjaStarted {
+			finalPhase = "final"
+		}
+		fmt.Printf("uni: final graph, %d target(s), -j%d\n", len(finalTargets), jobs)
+		if _, runErr := runner.runReported(ctx, report, &summary, "final", "--uni-ninja-mode", finalPhase, statePath,
+			phaseArgs(options, finalTargets, jobs, state.Dist), jobs); runErr != nil {
+			return runErr
+		}
+		finalRan = true
+	}
+	err = nil
 	if err == nil {
+		if historyErr := recordBuildHistory(top, state, runner, summary); historyErr != nil {
+			fmt.Fprintf(os.Stderr, "uni: build history warning: %v\n", historyErr)
+			report.event("history result=warning error=%q", historyErr)
+		} else {
+			report.event("history result=updated")
+		}
 		if options.SignKeys != "" {
 			result, signingErr := runSigning(ctx, top, outDir, state, options)
 			if signingErr != nil {

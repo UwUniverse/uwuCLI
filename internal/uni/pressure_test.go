@@ -34,21 +34,21 @@ func TestMemoryRetryJobs(t *testing.T) {
 	}
 }
 
-func TestRunaParallelismRampRaisesGraduallyAndStopsAtTwoPointFiveTimesInferredJobs(t *testing.T) {
+func TestRunaParallelismRampRestoresGraduallyToInferredJobs(t *testing.T) {
 	start := time.Unix(100, 0)
 	memory := MemorySnapshot{Total: 32 * gibibyte, Available: 20 * gibibyte}
 	var ramp runaParallelismRamp
-	if jobs, ceiling, raised := ramp.observe(start, memory, 0, swapRates{}, 18, 18); raised || jobs != 18 || ceiling != 45 {
-		t.Fatalf("initial ramp observation = %d/%d/%t, want 18/45/false", jobs, ceiling, raised)
+	if jobs, ceiling, raised := ramp.observe(start, memory, 0, swapRates{}, 12, 18); raised || jobs != 12 || ceiling != 18 {
+		t.Fatalf("initial ramp observation = %d/%d/%t, want 12/18/false", jobs, ceiling, raised)
 	}
-	if jobs, _, raised := ramp.observe(start.Add(runaParallelismRampInterval-time.Second), memory, 0, swapRates{}, 18, 18); raised || jobs != 18 {
-		t.Fatalf("early ramp observation = %d/%t, want 18/false", jobs, raised)
+	if jobs, _, raised := ramp.observe(start.Add(runaParallelismRampInterval-time.Second), memory, 0, swapRates{}, 12, 18); raised || jobs != 12 {
+		t.Fatalf("early ramp observation = %d/%t, want 12/false", jobs, raised)
 	}
-	jobs, ceiling, raised := ramp.observe(start.Add(runaParallelismRampInterval), memory, 0, swapRates{}, 18, 18)
-	if !raised || jobs != 21 || ceiling != 45 {
-		t.Fatalf("first ramp = %d/%d/%t, want 21/45/true", jobs, ceiling, raised)
+	jobs, ceiling, raised := ramp.observe(start.Add(runaParallelismRampInterval), memory, 0, swapRates{}, 12, 18)
+	if !raised || jobs != 15 || ceiling != 18 {
+		t.Fatalf("first ramp = %d/%d/%t, want 15/18/true", jobs, ceiling, raised)
 	}
-	now := start.Add(10 * runaParallelismRampInterval)
+	now := start.Add(2 * runaParallelismRampInterval)
 	for jobs < ceiling {
 		var increase bool
 		jobs, ceiling, increase = ramp.observe(now, memory, 0, swapRates{}, jobs, 18)
@@ -57,14 +57,14 @@ func TestRunaParallelismRampRaisesGraduallyAndStopsAtTwoPointFiveTimesInferredJo
 		}
 		now = now.Add(runaParallelismRampInterval)
 	}
-	if jobs != 45 {
-		t.Fatalf("ramp exceeded or missed ceiling: got %d, want 45", jobs)
+	if jobs != 18 {
+		t.Fatalf("ramp exceeded or missed ceiling: got %d, want 18", jobs)
 	}
-	if next, gotCeiling, increase := ramp.observe(now.Add(runaParallelismRampInterval), memory, 0, swapRates{}, jobs, 18); increase || next != 45 || gotCeiling != 45 {
-		t.Fatalf("at ceiling ramp = %d/%d/%t, want 45/45/false", next, gotCeiling, increase)
+	if next, gotCeiling, increase := ramp.observe(now.Add(runaParallelismRampInterval), memory, 0, swapRates{}, jobs, 18); increase || next != 18 || gotCeiling != 18 {
+		t.Fatalf("at ceiling ramp = %d/%d/%t, want 18/18/false", next, gotCeiling, increase)
 	}
-	if ceiling := runaParallelismCeiling(17); ceiling != 42 {
-		t.Fatalf("odd inferred job ceiling = %d, want 42", ceiling)
+	if ceiling := runaParallelismCeiling(17); ceiling != 17 {
+		t.Fatalf("inferred job ceiling = %d, want 17", ceiling)
 	}
 }
 
@@ -72,17 +72,17 @@ func TestRunaParallelismRampRequiresHealthyMemoryAndPSI(t *testing.T) {
 	start := time.Unix(100, 0)
 	var ramp runaParallelismRamp
 	healthy := MemorySnapshot{Total: 32 * gibibyte, Available: 20 * gibibyte}
-	if jobs, _, raised := ramp.observe(start, healthy, 0, swapRates{}, 18, 18); raised || jobs != 18 {
+	if jobs, _, raised := ramp.observe(start, healthy, 0, swapRates{}, 12, 18); raised || jobs != 12 {
 		t.Fatal("ramp increased without a sustained healthy interval")
 	}
 	pressured := MemorySnapshot{Total: 32 * gibibyte, Available: 5 * gibibyte}
-	if jobs, _, raised := ramp.observe(start.Add(runaParallelismRampInterval), pressured, 0, swapRates{}, 18, 18); raised || jobs != 18 {
+	if jobs, _, raised := ramp.observe(start.Add(runaParallelismRampInterval), pressured, 0, swapRates{}, 12, 18); raised || jobs != 12 {
 		t.Fatal("ramp increased with limited available memory")
 	}
-	if jobs, _, raised := ramp.observe(start.Add(2*runaParallelismRampInterval), healthy, runaParallelismRampMaxPSI, swapRates{}, 18, 18); raised || jobs != 18 {
+	if jobs, _, raised := ramp.observe(start.Add(2*runaParallelismRampInterval), healthy, runaParallelismRampMaxPSI, swapRates{}, 12, 18); raised || jobs != 12 {
 		t.Fatal("ramp increased with high memory PSI")
 	}
-	if jobs, _, raised := ramp.observe(start.Add(3*runaParallelismRampInterval), healthy, 0, swapRates{}, 18, 18); raised || jobs != 18 {
+	if jobs, _, raised := ramp.observe(start.Add(3*runaParallelismRampInterval), healthy, 0, swapRates{}, 12, 18); raised || jobs != 12 {
 		t.Fatal("ramp reused an old healthy interval after pressure")
 	}
 }
@@ -92,14 +92,14 @@ func TestRunaParallelismRampWaitsForSwapActivityToClear(t *testing.T) {
 	healthy := MemorySnapshot{Total: 32 * gibibyte, Available: 20 * gibibyte}
 	activeSwap := swapRates{inBytesPerSecond: runaSwapInPressureRate}
 	var ramp runaParallelismRamp
-	ramp.observe(start, healthy, 0, swapRates{}, 18, 18)
-	if jobs, _, raised := ramp.observe(start.Add(runaParallelismRampInterval), healthy, 0, activeSwap, 18, 18); raised || jobs != 18 {
+	ramp.observe(start, healthy, 0, swapRates{}, 12, 18)
+	if jobs, _, raised := ramp.observe(start.Add(runaParallelismRampInterval), healthy, 0, activeSwap, 12, 18); raised || jobs != 12 {
 		t.Fatal("ramp increased during active swap-in")
 	}
-	if jobs, _, raised := ramp.observe(start.Add(2*runaParallelismRampInterval), healthy, 0, swapRates{}, 18, 18); raised || jobs != 18 {
+	if jobs, _, raised := ramp.observe(start.Add(2*runaParallelismRampInterval), healthy, 0, swapRates{}, 12, 18); raised || jobs != 12 {
 		t.Fatal("ramp reused healthy time from before swap activity")
 	}
-	if jobs, _, raised := ramp.observe(start.Add(3*runaParallelismRampInterval), healthy, 0, swapRates{}, 18, 18); !raised || jobs != 21 {
+	if jobs, _, raised := ramp.observe(start.Add(3*runaParallelismRampInterval), healthy, 0, swapRates{}, 12, 18); !raised || jobs != 15 {
 		t.Fatalf("ramp did not resume after sustained swap-free interval: %d/%t", jobs, raised)
 	}
 }

@@ -232,13 +232,6 @@ func (runner *commandRunner) runReported(ctx context.Context, report *debugRepor
 	return runner.runReportedAttempt(ctx, report, summary, name, mode, phase, statePath, args, maxJobs, 0, true)
 }
 
-// runUnmanagedReported hands the prepared graph to one standard executor run.
-// It keeps telemetry and recovery bookkeeping, but does not apply uni's
-// scheduler controls to the build process.
-func (runner *commandRunner) runUnmanagedReported(ctx context.Context, report *debugReport, summary *buildSummary, name, mode, phase, statePath string, args []string, maxJobs int) (SegmentSample, error) {
-	return runner.runReportedAttempt(ctx, report, summary, name, mode, phase, statePath, args, maxJobs, 0, false)
-}
-
 func (runner *commandRunner) runReportedAttempt(ctx context.Context, report *debugReport, summary *buildSummary, name, mode, phase, statePath string, args []string, maxJobs, memoryRetries int, managed bool) (SegmentSample, error) {
 	var runaSession *runaControlSession
 	configuredUniNinja, explicitUniNinja := environmentValue(runner.baseEnv, "UNI_NINJA_BIN")
@@ -268,10 +261,10 @@ func (runner *commandRunner) runReportedAttempt(ctx context.Context, report *deb
 			defer runaSession.close()
 			fmt.Printf("uni: Runa runtime control enabled: executor=%s socket=%s\n", runaSession.binary, runaSession.socket)
 			ceiling := runaParallelismCeiling(maxJobs)
-			fmt.Printf("uni: Runa adaptive parallelism: initial -j%d, ceiling -j%d\n", maxJobs, ceiling)
+			fmt.Printf("uni: Runa bounded recovery: ceiling -j%d\n", ceiling)
 			if report != nil {
 				report.event("runa_control result=ready executor=%q", runaSession.binary)
-				report.event("runa_parallelism policy=healthy-headroom inferred_jobs=%d ceiling=%d step=%d interval=%s min_available=max(6GiB,total/5) max_memory_psi_full_avg10=%.1f",
+				report.event("runa_parallelism policy=bounded-recovery inferred_jobs=%d ceiling=%d step=%d interval=%s min_available=max(6GiB,total/5) max_memory_psi_full_avg10=%.1f",
 					maxJobs, ceiling, max(1, maxJobs/6), runaParallelismRampInterval, runaParallelismRampMaxPSI)
 			}
 		}

@@ -150,8 +150,11 @@ func TestSingleGraphStartupKeepsKernelExclusive(t *testing.T) {
 	if !reflect.DeepEqual(got.targets, []string{"kernel"}) || got.packageCount != 0 || got.r8Count != 0 {
 		t.Fatalf("single-graph startup = %+v, want exclusive kernel", got)
 	}
-	if got := constrainStartupForGraph(schedule, "kernel", false); !reflect.DeepEqual(got, schedule) {
-		t.Fatalf("multi-graph startup changed: %+v", got)
+	if got := constrainStartupForGraph(schedule, "kernel", false); !reflect.DeepEqual(got.targets, []string{"kernel"}) || got.packageCount != 0 {
+		t.Fatalf("multi-graph kernel startup = %+v, want exclusive kernel", got)
+	}
+	if got := constrainStartupForGraph(schedule, "", false); !reflect.DeepEqual(got, schedule) {
+		t.Fatalf("kernel-free multi-graph startup changed: %+v", got)
 	}
 }
 
