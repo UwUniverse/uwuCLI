@@ -8,6 +8,38 @@ set -Eeuo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SOURCE_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 readonly LINEAGE_COMMON_RE='^[[:space:]]*\$\(call[[:space:]]+inherit-product,[[:space:]]*vendor/lineage/config/common[^[:space:])]*\.mk[[:space:]]*\)[[:space:]]*(#.*)?$'
+readonly PIXEL_COMMON_RE='^[[:space:]]*\$\(call[[:space:]]+inherit-product,[[:space:]]*vendor/custom/config/common[^[:space:])]*\.mk[[:space:]]*\)[[:space:]]*(#.*)?$'
+
+MIGRATE_SOURCE=lineage
+PRODUCT_PREFIX=lineage_
+COMMON_RE=$LINEAGE_COMMON_RE
+COMMON_PATH_RE='vendor/lineage/config/common[^[:space:])]*\.mk'
+COMMON_COMMENT='# Inherit some common LineageOS stuff.'
+SOURCE_LABEL=LineageOS
+
+configure_migration() {
+    case "$1" in
+        lineage)
+            MIGRATE_SOURCE=lineage
+            PRODUCT_PREFIX=lineage_
+            COMMON_RE=$LINEAGE_COMMON_RE
+            COMMON_PATH_RE='vendor/lineage/config/common[^[:space:])]*\.mk'
+            COMMON_COMMENT='# Inherit some common LineageOS stuff.'
+            SOURCE_LABEL=LineageOS
+            ;;
+        pixelos)
+            MIGRATE_SOURCE=pixelos
+            PRODUCT_PREFIX=custom_
+            COMMON_RE=$PIXEL_COMMON_RE
+            COMMON_PATH_RE='vendor/custom/config/common[^[:space:])]*\.mk'
+            COMMON_COMMENT='# Inherit some common PixelOS stuff.'
+            SOURCE_LABEL=PixelOS
+            ;;
+        *)
+            die "Unknown migration source: $1" 2
+            ;;
+    esac
+}
 
 LANGUAGE="${UWU_LANG:-}"
 FORMAT="text"
@@ -74,7 +106,7 @@ declare -a SKIPPED=()
 print_banner() {
     [[ "$FORMAT" == text ]] || return 0
     local title="Product migration"
-    local description="Convert a LineageOS product tree into an uwuAOSP device tree"
+    local description="Convert a ${SOURCE_LABEL} product tree into an uwuAOSP device tree"
     case "${1:-migration}" in
         cli)
             title="Developer toolkit"
@@ -104,7 +136,7 @@ print_banner() {
             kernel) title="内核迁移"; description="将 legacy BoardConfig 内核配置转换为 uwu_kernel" ;;
             soong-only) title="Soong-only 就绪度"; description="查找仍依赖 Make 的产品 package" ;;
             release) title="Release workspace"; description="检查版本 manifest，并将本地修改迁移到更新的基线" ;;
-            *) title="产品迁移"; description="将 LineageOS 产品设备树转换为 uwuAOSP 设备树" ;;
+            *) title="产品迁移"; description="将 ${SOURCE_LABEL} 产品设备树转换为 uwuAOSP 设备树" ;;
         esac
     fi
     printf '\n  '
@@ -127,6 +159,44 @@ print_banner() {
 step() {
     [[ "$FORMAT" == text ]] || return 0
     printf '%s %s\n' "${BLUE}${BOLD}==>${RESET}" "$1"
+}
+
+migration_step() {
+    local message
+    if [[ "$LANGUAGE" == zh ]]; then
+        case "$1" in
+            scan) message="扫描产品设备树" ;;
+            select) message="选择产品设备树" ;;
+            options) message="收集设备选项" ;;
+            validate) message="验证源文件" ;;
+            preview) message="生成迁移预览" ;;
+            apply) message="应用迁移" ;;
+            radio) message="迁移 radio 文件" ;;
+            kernel) message="迁移内核配置" ;;
+        esac
+    else
+        case "$1" in
+            scan) message="Scanning product trees" ;;
+            select) message="Selecting product tree" ;;
+            options) message="Collecting device options" ;;
+            validate) message="Validating source files" ;;
+            preview) message="Preparing migration preview" ;;
+            apply) message="Applying migration" ;;
+            radio) message="Vendor radio migration" ;;
+            kernel) message="Kernel migration" ;;
+        esac
+    fi
+    step "$message"
+}
+
+migration_no_candidates_error() {
+    if [[ "$LANGUAGE" == zh ]]; then
+        printf "未找到可转换的 %s 产品设备树。请运行 'uwu product migrate %s list' 查看扫描结果。" \
+            "$SOURCE_LABEL" "$MIGRATE_SOURCE"
+    else
+        printf "No convertible %s product tree was found. Run 'uwu product migrate %s list' to inspect the scan results." \
+            "$SOURCE_LABEL" "$MIGRATE_SOURCE"
+    fi
 }
 
 section() {
@@ -156,6 +226,7 @@ global_usage() {
 用法：
   uwu                                      启动交互式向导
   uwu product migrate lineage [操作]       迁移 LineageOS 产品设备树
+  uwu product migrate pixelos [操作]       迁移 PixelOS 产品设备树
   uwu vendor convert radio [选项]          将 vendor radio files 转换为 uwu_prebuilt_image
   uwu kernel migrate [操作] [选项]         将 legacy 内核配置迁移到 uwu_kernel
   uwu inspect elf [选项]                   检查专有 ELF 文件
@@ -165,6 +236,10 @@ global_usage() {
 命令：
   product migrate lineage
       扫描、验证并转换 LineageOS 产品配置。
+      操作：list、check、plan、apply。
+
+  product migrate pixelos
+      用同一套替换把 PixelOS 的 custom_ 产品配置转成 uwu_。
       操作：list、check、plan、apply。
 
   vendor convert radio
@@ -192,6 +267,7 @@ global_usage() {
   uwu
   uwu --language zh
   uwu product migrate lineage plan --device fajita --type phone --telephony
+  uwu product migrate pixelos apply --device sunny --yes
   uwu kernel migrate plan --device-dir device/oneplus/sm8550-common
   uwu inspect elf --device fajita --jobs 4 --incremental
   uwu inspect soong-only --device astonc
@@ -202,6 +278,7 @@ EOF
 Usage:
   uwu                                      Start the interactive wizard
   uwu product migrate lineage [ACTION]     Migrate a LineageOS product tree
+  uwu product migrate pixelos [ACTION]     Migrate a PixelOS product tree
   uwu vendor convert radio [OPTIONS]       Convert vendor radio files to uwu_prebuilt_image
   uwu kernel migrate [ACTION] [OPTIONS]    Convert legacy kernel settings to uwu_kernel
   uwu inspect elf [OPTIONS]                Check proprietary ELF files
@@ -211,6 +288,10 @@ Usage:
 Commands:
   product migrate lineage
       Discover, validate, and convert LineageOS product definitions.
+      Actions: list, check, plan, and apply.
+
+  product migrate pixelos
+      Convert PixelOS custom_ product definitions with the same replacement.
       Actions: list, check, plan, and apply.
 
   vendor convert radio
@@ -238,6 +319,7 @@ Examples:
   uwu
   uwu --language zh
   uwu product migrate lineage plan --device fajita --type phone --telephony
+  uwu product migrate pixelos apply --device sunny --yes
   uwu kernel migrate plan --device-dir device/oneplus/sm8550-common
   uwu inspect elf --device fajita --jobs 4 --incremental
   uwu inspect soong-only --device astonc
@@ -297,20 +379,23 @@ EOF
 
 product_usage() {
     [[ -n "$LANGUAGE" ]] || LANGUAGE=en
+    local command="uwu product migrate ${MIGRATE_SOURCE}"
+    local example_device=fajita
+    [[ "$MIGRATE_SOURCE" == pixelos ]] && example_device=sunny
     print_banner migration
     if [[ "$LANGUAGE" == zh ]]; then
-        cat <<'EOF'
-uwu product migrate lineage - 将 LineageOS 产品设备树转换为 uwuAOSP
+        cat <<EOF
+${command} - 将 ${SOURCE_LABEL} 产品设备树转换为 uwuAOSP
 
 用法：
-  uwu product migrate lineage [list]
-  uwu product migrate lineage check [选项]
-  uwu product migrate lineage plan [选项]
-  uwu product migrate lineage apply [选项]
+  ${command} [list]
+  ${command} check [选项]
+  ${command} plan [选项]
+  ${command} apply [选项]
 
 选项：
   --device NAME                 选择设备代号
-  --product-file PATH           显式指定 lineage 产品文件
+  --product-file PATH           显式指定 ${PRODUCT_PREFIX} 产品文件
   --type TYPE                   phone、tablet 或 foldable
   --telephony                   启用移动数据支持
   --no-telephony                禁用移动数据支持
@@ -322,23 +407,23 @@ uwu product migrate lineage - 将 LineageOS 产品设备树转换为 uwuAOSP
   -h, --help                    显示帮助
 
 示例：
-  uwu product migrate lineage list
-  uwu product migrate lineage plan --device fajita --type phone --telephony
-  uwu product migrate lineage apply --device fajita --type phone --no-telephony
+  ${command} list
+  ${command} plan --device ${example_device} --type phone --telephony
+  ${command} apply --device ${example_device} --type phone --telephony --yes
 EOF
     else
-        cat <<'EOF'
-uwu product migrate lineage - Convert a LineageOS product tree to uwuAOSP
+        cat <<EOF
+${command} - Convert a ${SOURCE_LABEL} product tree to uwuAOSP
 
 Usage:
-  uwu product migrate lineage [list]
-  uwu product migrate lineage check [options]
-  uwu product migrate lineage plan [options]
-  uwu product migrate lineage apply [options]
+  ${command} [list]
+  ${command} check [options]
+  ${command} plan [options]
+  ${command} apply [options]
 
 Options:
   --device NAME                 Select a device codename
-  --product-file PATH           Select a lineage product file explicitly
+  --product-file PATH           Select a ${PRODUCT_PREFIX} product file explicitly
   --type TYPE                   phone, tablet, or foldable
   --telephony                   Enable mobile-data support
   --no-telephony                Disable mobile-data support
@@ -350,9 +435,9 @@ Options:
   -h, --help                   Show this help
 
 Examples:
-  uwu product migrate lineage list
-  uwu product migrate lineage plan --device foo --type phone --telephony
-  uwu product migrate lineage apply --device foo --type phone --no-telephony
+  ${command} list
+  ${command} plan --device ${example_device} --type phone --telephony
+  ${command} apply --device ${example_device} --type phone --telephony --yes
 EOF
     fi
 }
@@ -481,7 +566,7 @@ msg() {
     if [[ "$LANGUAGE" == "zh" ]]; then
         case "$1" in
             found) printf '%s\n' "${CYAN}找到 $2 个可转换产品设备树${RESET}" ;;
-            no_candidates) printf '未找到可转换的 LineageOS 产品设备树。\n' ;;
+            no_candidates) printf '未找到可转换的 %s 产品设备树。\n' "$SOURCE_LABEL" ;;
             select) printf '%s\n' "${BOLD}选择产品设备树：${RESET}" ;;
             type) printf '设备类型（phone/tablet/foldable）：' ;;
             telephony) printf '是否支持移动数据？[y/N]：' ;;
@@ -491,7 +576,7 @@ msg() {
             confirm) printf '\n%s ' "${YELLOW}${BOLD}应用这些修改？ [y/N]${RESET}" ;;
             success) printf '\n%s\n' "${GREEN}${BOLD}迁移成功${RESET}: $2" ;;
             unchanged) printf '未修改任何文件。\n' ;;
-            vendor_missing) printf '%s\n' "${YELLOW}未找到 vendor 生成目录：$2。请先运行 LineageOS 提取脚本设置 vendor tree；radio files 的转换需待 vendor tree 就绪后在 uwuAOSP 编译系统中完成。${RESET}" ;;
+            vendor_missing) printf '%s\n' "${YELLOW}未找到 vendor 生成目录：$2。请先运行 ${SOURCE_LABEL} 提取脚本设置 vendor tree；radio files 的转换需待 vendor tree 就绪后在 uwuAOSP 编译系统中完成。${RESET}" ;;
             radio_confirm) printf '\n%s ' "${YELLOW}${BOLD}是否将 radio files 转换为 uwu_prebuilt_image？ [y/N]${RESET}" ;;
             radio_none) printf '%s\n' "${CYAN}$2 中未发现需要转换的 radio files${RESET}" ;;
             radio_success) printf '%s\n' "${GREEN}${BOLD}Radio 转换完成${RESET}: $2 个镜像" ;;
@@ -500,7 +585,7 @@ msg() {
     else
         case "$1" in
             found) printf '%s\n' "${CYAN}Found $2 convertible product tree(s)${RESET}" ;;
-            no_candidates) printf 'No convertible LineageOS product tree was found.\n' ;;
+            no_candidates) printf 'No convertible %s product tree was found.\n' "$SOURCE_LABEL" ;;
             select) printf '%s\n' "${BOLD}Select a product tree:${RESET}" ;;
             type) printf 'Device type (phone/tablet/foldable): ' ;;
             telephony) printf 'Does this device support mobile data? [y/N]: ' ;;
@@ -510,7 +595,7 @@ msg() {
             confirm) printf '\n%s ' "${YELLOW}${BOLD}Apply these changes? [y/N]${RESET}" ;;
             success) printf '\n%s\n' "${GREEN}${BOLD}Migration succeeded${RESET}: $2" ;;
             unchanged) printf 'No files were changed.\n' ;;
-            vendor_missing) printf '%s\n' "${YELLOW}Vendor generated directory not found: $2. Run the LineageOS extraction scripts to set up the vendor tree first; radio files must then be converted within the uwuAOSP build system.${RESET}" ;;
+            vendor_missing) printf '%s\n' "${YELLOW}Vendor generated directory not found: $2. Run the ${SOURCE_LABEL} extraction scripts to set up the vendor tree first; radio files must then be converted within the uwuAOSP build system.${RESET}" ;;
             radio_confirm) printf '\n%s ' "${YELLOW}${BOLD}Convert radio files to uwu_prebuilt_image? [y/N]${RESET}" ;;
             radio_none) printf '%s\n' "${CYAN}No radio files to convert in $2${RESET}" ;;
             radio_success) printf '%s\n' "${GREEN}${BOLD}Radio migration succeeded${RESET}: $2 image(s)" ;;
@@ -526,28 +611,36 @@ choose_main_action() {
             printf '\n%s\n' "${BOLD}你想进行什么操作？${RESET}"
             printf '  %s1%s) 改造 LineageOS 产品设备树\n' "$CYAN" "$RESET"
             printf '  %s2%s) 检查专有 ELF 文件\n' "$CYAN" "$RESET"
+            printf '  %s3%s) 改造 PixelOS 产品设备树\n' "$CYAN" "$RESET"
             printf '\n请选择操作：'
         else
             printf '\n%s\n' "${BOLD}What would you like to do?${RESET}"
             printf '  %s1%s) Migrate a LineageOS product tree\n' "$CYAN" "$RESET"
             printf '  %s2%s) Check proprietary ELF files\n' "$CYAN" "$RESET"
+            printf '  %s3%s) Migrate a PixelOS product tree\n' "$CYAN" "$RESET"
             printf '\nSelect an action: '
         fi
         if ! IFS= read -r choice; then
             die 'No input received.'
         fi
         case "$choice" in
-            1|migrate|migration)
+            1|migrate|migration|lineage)
+                MAIN_ACTION=lineage
                 return 0
                 ;;
             2|elf|check)
-                return 1
+                MAIN_ACTION=elf
+                return 0
+                ;;
+            3|pixelos)
+                MAIN_ACTION=pixelos
+                return 0
                 ;;
             *)
                 if [[ "$LANGUAGE" == zh ]]; then
-                    printf '%s\n' "${RED}选择无效，请输入 1 或 2。${RESET}" >&2
+                    printf '%s\n' "${RED}选择无效，请输入 1、2 或 3。${RESET}" >&2
                 else
-                    printf '%s\n' "${RED}Invalid selection. Choose 1 or 2.${RESET}" >&2
+                    printf '%s\n' "${RED}Invalid selection. Choose 1, 2, or 3.${RESET}" >&2
                 fi
                 ;;
         esac
@@ -585,7 +678,11 @@ validate_language() {
 }
 
 die() {
-    printf 'Error: %s\n' "$1" >&2
+    if [[ "$LANGUAGE" == zh ]]; then
+        printf '错误：%s\n' "$1" >&2
+    else
+        printf 'Error: %s\n' "$1" >&2
+    fi
     msg unchanged >&2
     exit "${2:-1}"
 }
@@ -606,8 +703,8 @@ find_candidates() {
     SKIPPED=()
     while IFS= read -r -d '' file; do
         reason=""
-        if ! grep -Eq -- "$LINEAGE_COMMON_RE" "$file"; then
-            reason="missing LineageOS common configuration"
+        if ! grep -Eq -- "$COMMON_RE" "$file"; then
+            reason="missing ${SOURCE_LABEL} common configuration"
         elif [[ ! -f "$(dirname -- "$file")/AndroidProducts.mk" ]]; then
             reason="missing AndroidProducts.mk"
         fi
@@ -616,7 +713,7 @@ find_candidates() {
         else
             CANDIDATES+=("$file")
         fi
-    done < <(find "$SOURCE_ROOT/device" -mindepth 3 -maxdepth 3 -type f -name 'lineage_*.mk' -print0 2>/dev/null)
+    done < <(find "$SOURCE_ROOT/device" -mindepth 3 -maxdepth 3 -type f -name "${PRODUCT_PREFIX}*.mk" -print0 2>/dev/null)
 }
 
 find_elf_device_dirs() {
@@ -744,7 +841,7 @@ print_candidates() {
         local first=true
         for file in "${CANDIDATES[@]}"; do
             name="$(basename "$file" .mk)"
-            name="${name#lineage_}"
+            name="${name#"$PRODUCT_PREFIX"}"
             $first || printf ','
             printf '{"device":"%s","path":"%s"}' "$name" "$(relative_path "$file")"
             first=false
@@ -765,7 +862,7 @@ print_candidates() {
         printf '\n%s\n' "${GREEN}${BOLD}Convertible${RESET}"
         for file in "${CANDIDATES[@]}"; do
             name="$(basename "$file" .mk)"
-            name="${name#lineage_}"
+            name="${name#"$PRODUCT_PREFIX"}"
             status_line '✓' "$GREEN" "$name" "$(relative_path "$file")"
         done
     fi
@@ -789,14 +886,17 @@ select_product() {
     if [[ -n "$DEVICE" ]]; then
         for file in "${CANDIDATES[@]}"; do
             name="$(basename "$file" .mk)"
-            if [[ "${name#lineage_}" == "$DEVICE" ]]; then
+            if [[ "${name#"$PRODUCT_PREFIX"}" == "$DEVICE" ]]; then
                 SELECTED_PRODUCT_FILE="$file"
                 return
             fi
         done
-        die "No convertible product tree found for device '$DEVICE'. Run 'uwu product migrate lineage list'."
+        if [[ "$LANGUAGE" == zh ]]; then
+            die "未找到设备 '$DEVICE' 的可转换 ${SOURCE_LABEL} 产品设备树。请运行 'uwu product migrate ${MIGRATE_SOURCE} list' 查看扫描结果。"
+        fi
+        die "No convertible ${SOURCE_LABEL} product tree found for device '$DEVICE'. Run 'uwu product migrate ${MIGRATE_SOURCE} list' to inspect the scan results."
     fi
-    (( ${#CANDIDATES[@]} > 0 )) || die "No convertible product tree was found."
+    (( ${#CANDIDATES[@]} > 0 )) || die "$(migration_no_candidates_error)"
     if (( ${#CANDIDATES[@]} == 1 )); then
         SELECTED_PRODUCT_FILE="${CANDIDATES[0]}"
         status_line '✓' "$GREEN" 'Selected' "$(relative_path "$SELECTED_PRODUCT_FILE")"
@@ -807,7 +907,7 @@ select_product() {
     for index in "${!CANDIDATES[@]}"; do
         file="${CANDIDATES[$index]}"
         name="$(basename "$file" .mk)"
-        printf '  %s%s%s  %-20s %s\n' "$CYAN" "$((index + 1))" "$RESET" "${name#lineage_}" "${DIM}$(relative_path "$file")${RESET}"
+        printf '  %s%s%s  %-20s %s\n' "$CYAN" "$((index + 1))" "$RESET" "${name#"$PRODUCT_PREFIX"}" "${DIM}$(relative_path "$file")${RESET}"
     done
     while true; do
         read -r -p '> ' choice || die "No input received."
@@ -870,15 +970,15 @@ validate_product() {
     DEVICE_DIR="$(dirname -- "$SELECTED_PRODUCT_FILE")"
     ANDROID_PRODUCTS_FILE="$DEVICE_DIR/AndroidProducts.mk"
     PRODUCT_BASENAME="$(basename -- "$SELECTED_PRODUCT_FILE" .mk)"
-    PRODUCT_SUFFIX="${PRODUCT_BASENAME#lineage_}"
-    LINEAGE_PRODUCT="lineage_$PRODUCT_SUFFIX"
+    PRODUCT_SUFFIX="${PRODUCT_BASENAME#"$PRODUCT_PREFIX"}"
+    LINEAGE_PRODUCT="${PRODUCT_PREFIX}${PRODUCT_SUFFIX}"
     UWU_PRODUCT="uwu_$PRODUCT_SUFFIX"
     UWU_PRODUCT_FILE="$DEVICE_DIR/$UWU_PRODUCT.mk"
-    [[ "$PRODUCT_BASENAME" == lineage_* && "$PRODUCT_SUFFIX" =~ ^[A-Za-z0-9_]+$ ]] || die "Invalid product codename: $PRODUCT_SUFFIX"
+    [[ "$PRODUCT_BASENAME" == "$PRODUCT_PREFIX"* && "$PRODUCT_SUFFIX" =~ ^[A-Za-z0-9_]+$ ]] || die "Invalid product codename: $PRODUCT_SUFFIX"
     [[ -f "$ANDROID_PRODUCTS_FILE" ]] || die "Missing file: $(relative_path "$ANDROID_PRODUCTS_FILE")"
     [[ ! -e "$UWU_PRODUCT_FILE" ]] || die "Target file already exists: $(relative_path "$UWU_PRODUCT_FILE")"
-    [[ "$(grep -Ec -- "$LINEAGE_COMMON_RE" "$SELECTED_PRODUCT_FILE")" == 1 ]] || die "Product file must contain exactly one LineageOS common configuration entry."
-    [[ "$(grep -Ec '^[[:space:]]*PRODUCT_NAME[[:space:]]*(:|\+|\?)?=[[:space:]]*lineage_' "$SELECTED_PRODUCT_FILE")" == 1 ]] || die "Product file must contain exactly one lineage_ PRODUCT_NAME."
+    [[ "$(grep -Ec -- "$COMMON_RE" "$SELECTED_PRODUCT_FILE")" == 1 ]] || die "Product file must contain exactly one ${SOURCE_LABEL} common configuration entry."
+    [[ "$(grep -Ec -- "^[[:space:]]*PRODUCT_NAME[[:space:]]*(:|\\+|\\?)?=[[:space:]]*${PRODUCT_PREFIX}" "$SELECTED_PRODUCT_FILE")" == 1 ]] || die "Product file must contain exactly one ${PRODUCT_PREFIX} PRODUCT_NAME."
     [[ "$(grep -Fc -- "$LINEAGE_PRODUCT.mk" "$ANDROID_PRODUCTS_FILE")" == 1 ]] || die "AndroidProducts.mk must reference $LINEAGE_PRODUCT.mk exactly once."
 }
 
@@ -887,11 +987,11 @@ make_plan() {
     ANDROID_PRODUCTS_TMP="$(mktemp "$DEVICE_DIR/.uwu-products.XXXXXX")"
     chmod --reference="$SELECTED_PRODUCT_FILE" "$PRODUCT_TMP" "$ANDROID_PRODUCTS_TMP"
     local common_line common_path
-    common_line="$(grep -En -- "$LINEAGE_COMMON_RE" "$SELECTED_PRODUCT_FILE" | cut -d: -f1)"
-    common_path="$(grep -Eo 'vendor/lineage/config/common[^[:space:])]*\.mk' "$SELECTED_PRODUCT_FILE" | head -n1)"
-    awk -v common_line="$common_line" -v device_type="$DEVICE_TYPE" -v telephony="$SUPPORTS_TELEPHONY" -v maintainer="$MAINTAINER" -v old="$LINEAGE_PRODUCT" -v new="$UWU_PRODUCT" '
+    common_line="$(grep -En -- "$COMMON_RE" "$SELECTED_PRODUCT_FILE" | cut -d: -f1)"
+    common_path="$(grep -Eo -- "$COMMON_PATH_RE" "$SELECTED_PRODUCT_FILE" | head -n1)"
+    awk -v common_line="$common_line" -v device_type="$DEVICE_TYPE" -v telephony="$SUPPORTS_TELEPHONY" -v maintainer="$MAINTAINER" -v old="$LINEAGE_PRODUCT" -v new="$UWU_PRODUCT" -v comment_from="$COMMON_COMMENT" -v prefix="$PRODUCT_PREFIX" '
         NR == common_line { print "UWU_DEVICE_TYPE := " device_type; print "UWU_SUPPORTS_TELEPHONY := " telephony; if (maintainer != "") print "UWU_MAINTAINER := " maintainer; print "$(call inherit-product, vendor/uwu/config/common.mk)"; next }
-        { if ($0 == "# Inherit some common LineageOS stuff.") $0 = "# Inherit some common uwuAOSP stuff."; if ($0 ~ /^[[:space:]]*PRODUCT_NAME[[:space:]]*(:|\+|\?)?=[[:space:]]*lineage_/) sub(/lineage_/, "uwu_"); gsub(old, new); print }
+        { if ($0 == comment_from) $0 = "# Inherit some common uwuAOSP stuff."; if ($0 ~ "^[[:space:]]*PRODUCT_NAME[[:space:]]*(:|\\+|\\?)?=[[:space:]]*" prefix) sub(prefix, "uwu_"); gsub(old, new); print }
     ' "$SELECTED_PRODUCT_FILE" > "$PRODUCT_TMP"
     awk -v old="$LINEAGE_PRODUCT" -v new="$UWU_PRODUCT" '{ gsub(old "\\.mk", new ".mk"); gsub(old "-[A-Za-z0-9_.]+-userdebug", new "-cp2a-userdebug"); gsub(old "-userdebug", new "-cp2a-userdebug"); gsub(old "-[A-Za-z0-9_.]+-user", new "-cp2a-user"); gsub(old "-user", new "-cp2a-user"); gsub(old "-[A-Za-z0-9_.]+-eng", new "-cp2a-eng"); gsub(old "-eng", new "-cp2a-eng"); print }' "$ANDROID_PRODUCTS_FILE" > "$ANDROID_PRODUCTS_TMP"
     grep -Fq '$(call inherit-product, vendor/uwu/config/common.mk)' "$PRODUCT_TMP" || die "Generated product file failed validation."
@@ -1235,8 +1335,21 @@ parse_options() {
     validate_language
 }
 
+infer_pixelos_options() {
+    [[ "$MIGRATE_SOURCE" == pixelos ]] || return 0
+    [[ -n "$DEVICE_TYPE" && -n "$SUPPORTS_TELEPHONY" ]] && return 0
+    local path base
+    path="$(grep -Eo -- "$COMMON_PATH_RE" "$SELECTED_PRODUCT_FILE" | head -n1)"
+    base="$(basename -- "$path" .mk)"
+    if [[ "$base" == common_full_phone ]]; then
+        [[ -n "$DEVICE_TYPE" ]] || DEVICE_TYPE=phone
+        [[ -n "$SUPPORTS_TELEPHONY" ]] || SUPPORTS_TELEPHONY=true
+    fi
+}
+
 main() {
-    [[ "${1:-}" == product && "${2:-}" == migrate && "${3:-}" == lineage ]] || { global_usage; exit 2; }
+    [[ "${1:-}" == product && "${2:-}" == migrate && ( "${3:-}" == lineage || "${3:-}" == pixelos ) ]] || { global_usage; exit 2; }
+    configure_migration "$3"
     shift 3
     local format_action="${1:-plan}"
     if [[ "$format_action" == list || "$format_action" == check || "$format_action" == plan || "$format_action" == apply ]]; then
@@ -1253,32 +1366,33 @@ main() {
     fi
     require_source_tree
     print_banner
-    step 'Scanning product trees'
+    migration_step scan
     find_candidates
     if [[ "$format_action" == list ]]; then print_candidates; exit 0; fi
-    (( ${#CANDIDATES[@]} )) || die "No convertible product tree was found. Run 'uwu product migrate lineage list'."
-    step 'Selecting product tree'
+    (( ${#CANDIDATES[@]} )) || die "$(migration_no_candidates_error)"
+    migration_step select
     select_product
-    step 'Collecting device options'
+    infer_pixelos_options
+    migration_step options
     ask_options
-    step 'Validating source files'
+    migration_step validate
     validate_product
     status_line '✓' "$GREEN" 'Validation' 'passed'
-    step 'Preparing migration preview'
+    migration_step preview
     make_plan
     if [[ "$FORMAT" == json ]]; then
-        printf '{"operation":"product.migrate.lineage","device":"%s","product":"%s","target":"%s","device_type":"%s","telephony":%s,"maintainer":"%s","changed":true}\n' "$PRODUCT_SUFFIX" "$LINEAGE_PRODUCT" "$UWU_PRODUCT" "$DEVICE_TYPE" "$SUPPORTS_TELEPHONY" "$MAINTAINER"
+        printf '{"operation":"product.migrate.%s","device":"%s","product":"%s","target":"%s","device_type":"%s","telephony":%s,"maintainer":"%s","changed":true}\n' "$MIGRATE_SOURCE" "$PRODUCT_SUFFIX" "$LINEAGE_PRODUCT" "$UWU_PRODUCT" "$DEVICE_TYPE" "$SUPPORTS_TELEPHONY" "$MAINTAINER"
     else
         print_plan
     fi
     [[ "$format_action" == check || "$format_action" == plan || "$DRY_RUN" == true ]] && exit 0
     confirm_apply
-    step 'Applying migration'
+    migration_step apply
     apply_plan
     status_line '✓' "$GREEN" 'Files changed' '2'
     msg success "$(relative_path "$UWU_PRODUCT_FILE")"
 
-    step 'Vendor radio migration'
+    migration_step radio
     local vendor_root answer
     vendor_root="$(vendor_root_from_device_dir "$DEVICE_DIR")"
     if [[ ! -d "$vendor_root" ]]; then
@@ -1293,7 +1407,7 @@ main() {
         fi
     fi
 
-    step 'Kernel migration'
+    migration_step kernel
     if python3 "$SCRIPT_DIR/kernel_migrate.py" apply --device-dir "$(relative_path "$DEVICE_DIR")" --format json >/dev/null; then
         status_line '✓' "$GREEN" 'Kernel' 'migrated to uwu_kernel'
     else
@@ -1340,11 +1454,12 @@ elif [[ $# -ge 1 && "$1" == release ]]; then
     release_main "$@"
 elif [[ $# -eq 0 ]]; then
     [[ -n "$LANGUAGE" ]] || choose_language
-    if choose_main_action; then
-        main product migrate lineage apply
-    else
-        inspect_elf
-    fi
+    choose_main_action
+    case "$MAIN_ACTION" in
+        lineage) main product migrate lineage apply ;;
+        pixelos) main product migrate pixelos apply ;;
+        elf) inspect_elf ;;
+    esac
 elif [[ "$1" == --help || "$1" == -h ]]; then
     global_usage
     exit 0
