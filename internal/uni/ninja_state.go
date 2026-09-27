@@ -96,6 +96,39 @@ func mergeNinjaLogs(older, newer ninjaLogData) ninjaLogData {
 	return merged
 }
 
+func filterNinjaLogByOutputs(data ninjaLogData, outDir string) ninjaLogData {
+	filtered := ninjaLogData{
+		header: data.header,
+		lines:  make(map[string]string, len(data.lines)),
+		order:  make([]string, 0, len(data.order)),
+	}
+	for _, output := range data.order {
+		line := data.lines[output]
+		fields := strings.SplitN(line, "\t", 5)
+		if len(fields) != 5 {
+			continue
+		}
+		loggedMtime, err := strconv.ParseInt(fields[2], 10, 64)
+		if err != nil {
+			continue
+		}
+		path := output
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(filepath.Dir(outDir), filepath.FromSlash(output))
+			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+				path = filepath.Join(outDir, filepath.FromSlash(output))
+			}
+		}
+		info, err := os.Stat(path)
+		if err != nil || info.ModTime().UnixNano() != loggedMtime {
+			continue
+		}
+		filtered.order = append(filtered.order, output)
+		filtered.lines[output] = line
+	}
+	return filtered
+}
+
 func apiNinjaOutput(output string) bool {
 	normalized := filepath.ToSlash(output)
 	if !strings.Contains(normalized, "/.intermediates/") {
@@ -409,7 +442,7 @@ func ninjaRecoveryRequired(outDir string) (bool, error) {
 	return err == nil, err
 }
 
-func recoverNinjaLog(outDir string, _ bool, _ bool) error {
+func recoverNinjaLog(outDir string, forceMerge, trustOutput bool) error {
 	currentPath := filepath.Join(outDir, ".ninja_log")
 	backupPath := filepath.Join(ninjaRecoveryDirectory(outDir), ".ninja_log")
 	backup, backupErr := readNinjaLog(backupPath)
@@ -428,6 +461,10 @@ func recoverNinjaLog(outDir string, _ bool, _ bool) error {
 	}
 	if currentErr != nil {
 		current = ninjaLogData{lines: make(map[string]string)}
+	}
+	if forceMerge && !trustOutput {
+		backup = filterNinjaLogByOutputs(backup, outDir)
+		current = filterNinjaLogByOutputs(current, outDir)
 	}
 	apiMismatch, err := apiSnapshotMismatch(outDir)
 	if err != nil {
