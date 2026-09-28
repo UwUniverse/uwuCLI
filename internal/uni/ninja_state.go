@@ -134,12 +134,60 @@ func apiNinjaOutput(output string) bool {
 	if !strings.Contains(normalized, "/.intermediates/") {
 		return false
 	}
-	return strings.Contains(normalized, "/api/") ||
-		strings.Contains(normalized, "_api.txt") ||
+	return strings.Contains(normalized, "_api.txt") ||
 		strings.Contains(normalized, "_removed.txt") ||
 		strings.Contains(normalized, "check_current_api.timestamp") ||
 		strings.Contains(normalized, "check_last_released_api.timestamp") ||
 		strings.Contains(normalized, "api_lint.timestamp")
+}
+
+func restatAPIOutput(output string) bool {
+	normalized := filepath.ToSlash(output)
+	if !strings.Contains(normalized, "/.intermediates/") || !strings.Contains(normalized, "/everything/") {
+		return false
+	}
+	return strings.HasSuffix(normalized, "_api.txt") ||
+		strings.HasSuffix(normalized, "_removed.txt") ||
+		strings.HasSuffix(normalized, "api_lint.timestamp") ||
+		strings.HasSuffix(normalized, "check_last_released_api.timestamp")
+}
+
+func ninjaOutputPath(output, outDir string) string {
+	path := output
+	if filepath.IsAbs(path) {
+		return path
+	}
+	path = filepath.Join(filepath.Dir(outDir), filepath.FromSlash(path))
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		path = filepath.Join(outDir, filepath.FromSlash(output))
+	}
+	return path
+}
+
+func filterNinjaLogByInterruptedOutputs(data ninjaLogData, outDir string) ninjaLogData {
+	filtered := ninjaLogData{
+		header: data.header,
+		lines:  make(map[string]string, len(data.lines)),
+		order:  make([]string, 0, len(data.order)),
+	}
+	for _, output := range data.order {
+		line := data.lines[output]
+		fields := strings.SplitN(line, "\t", 5)
+		if len(fields) != 5 {
+			continue
+		}
+		loggedMtime, err := strconv.ParseInt(fields[2], 10, 64)
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(ninjaOutputPath(output, outDir))
+		if err != nil || (info.ModTime().UnixNano() > loggedMtime && !restatAPIOutput(output)) {
+			continue
+		}
+		filtered.order = append(filtered.order, output)
+		filtered.lines[output] = line
+	}
+	return filtered
 }
 
 func filterNinjaLogByAPIOutputs(data ninjaLogData, outDir string, apiMismatch bool) ninjaLogData {
@@ -166,15 +214,17 @@ func filterNinjaLogByAPIOutputs(data ninjaLogData, outDir string, apiMismatch bo
 		if err != nil {
 			continue
 		}
-		path := output
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(filepath.Dir(outDir), filepath.FromSlash(path))
-			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-				path = filepath.Join(outDir, filepath.FromSlash(output))
-			}
+		info, err := os.Stat(ninjaOutputPath(output, outDir))
+		mtime := int64(0)
+		if err == nil {
+			mtime = info.ModTime().UnixNano()
 		}
-		info, err := os.Stat(path)
-		if err != nil || info.ModTime().UnixNano() != loggedMtime {
+		// Metalava's sbox outputs under everything/ are restat outputs. Ninja
+		// records the latest input mtime when their bytes do not change, so this
+		// one class of API outputs can legitimately have a newer log time than
+		// their filesystem mtime. Keep the normal freshness check for other API
+		// outputs; recovery must still reject interrupted or stale outputs.
+		if err != nil || (mtime > loggedMtime) || (mtime < loggedMtime && !restatAPIOutput(output)) {
 			continue
 		}
 		filtered.order = append(filtered.order, output)
@@ -469,6 +519,10 @@ func recoverNinjaLog(outDir string, forceMerge, trustOutput bool) error {
 	apiMismatch, err := apiSnapshotMismatch(outDir)
 	if err != nil {
 		return err
+	}
+	if forceMerge && !trustOutput {
+		backup = filterNinjaLogByInterruptedOutputs(backup, outDir)
+		current = filterNinjaLogByInterruptedOutputs(current, outDir)
 	}
 	backup = filterNinjaLogByAPIOutputs(backup, outDir, apiMismatch)
 	current = filterNinjaLogByAPIOutputs(current, outDir, apiMismatch)

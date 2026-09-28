@@ -36,6 +36,7 @@ func TestAPINinjaOutput(t *testing.T) {
 		{"out/soong/.intermediates/packages/providers/MediaProvider/pdf/framework-v/generated_api.txt", true},
 		{"out/soong/.intermediates/packages/providers/MediaProvider/pdf/framework-v/generated_removed.txt", true},
 		{"out/soong/.intermediates/packages/services/Car/car-lib/android_common/everything/check_current_api.timestamp", true},
+		{"out/soong/.intermediates/frameworks/base/api/api-stubs-docs-non-updatable/android_common/metalava.sbox.textproto", false},
 		{"out/soong/.intermediates/packages/apps/Settings/Settings-core/kotlin/Settings.jar", false},
 		{"out/target/product/device/system/api/foo", false},
 	} {
@@ -43,6 +44,69 @@ func TestAPINinjaOutput(t *testing.T) {
 			t.Errorf("apiNinjaOutput(%q) = %t, want %t", test.path, got, test.want)
 		}
 	}
+}
+
+func TestFilterNinjaLogKeepsRestatAPIOutput(t *testing.T) {
+	outDir := t.TempDir()
+	output := "out/soong/.intermediates/frameworks/base/api/api-stubs-docs-non-updatable/android_common/everything/api-stubs-docs-non-updatable_api.txt"
+	outputPath := filepath.Join(outDir, filepath.FromSlash(output))
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outputPath, []byte("unchanged API"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loggedMtime := info.ModTime().Add(time.Second).UnixNano()
+	data, err := readNinjaLog(writeTestNinjaLog(t, outDir, fmt.Sprintf(
+		"1\t2\t%d\t%s\thash", loggedMtime, filepath.ToSlash(output))))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	filtered := filterNinjaLogByAPIOutputs(data, outDir, false)
+	if _, ok := filtered.lines[output]; !ok {
+		t.Fatal("restat API output with a newer logged input mtime was discarded")
+	}
+}
+
+func TestFilterNinjaLogDropsAPIOutputChangedAfterLog(t *testing.T) {
+	outDir := t.TempDir()
+	output := "out/soong/.intermediates/frameworks/base/api/api-stubs-docs-non-updatable/android_common/everything/api-stubs-docs-non-updatable_api.txt"
+	outputPath := filepath.Join(outDir, filepath.FromSlash(output))
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outputPath, []byte("changed API"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loggedMtime := info.ModTime().Add(-time.Second).UnixNano()
+	data, err := readNinjaLog(writeTestNinjaLog(t, outDir, fmt.Sprintf(
+		"1\t2\t%d\t%s\thash", loggedMtime, filepath.ToSlash(output))))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	filtered := filterNinjaLogByAPIOutputs(data, outDir, false)
+	if _, ok := filtered.lines[output]; ok {
+		t.Fatal("API output newer than its log entry was retained")
+	}
+}
+
+func writeTestNinjaLog(t *testing.T, outDir string, entry string) string {
+	t.Helper()
+	path := filepath.Join(outDir, ".test-ninja-log")
+	if err := os.WriteFile(path, []byte(testNinjaLog(entry)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestMergeNinjaLogKeepsLatestEntries(t *testing.T) {
