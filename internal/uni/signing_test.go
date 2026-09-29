@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -83,7 +84,7 @@ func TestInitializeSigningKeysAndReuse(t *testing.T) {
 	writeExecutable(t, tools.signTargetFiles, "previous=; last=; for argument in \"$@\"; do previous=$last; last=$argument; done; cp \"$previous\" \"$last\"")
 	writeExecutable(t, tools.otaFromTarget, "cp \"$3\" \"$4\"")
 	for range 2 {
-		if _, err := signTargetFiles(context.Background(), targetFiles, keysDir, "", t.TempDir(), "product", false, tools); err != nil {
+		if _, err := signTargetFiles(context.Background(), targetFiles, keysDir, "", t.TempDir(), "product", true, false, tools); err != nil {
 			t.Fatalf("reuse signing keys: %v", err)
 		}
 	}
@@ -218,7 +219,7 @@ func TestManagedApexSigningKeysAreReused(t *testing.T) {
 	}
 	writeExecutable(t, tools.signTargetFiles, "printf '%s\\n' \"$@\" > \"$SIGN_ARGS_FILE\"\nprevious=; last=; for argument in \"$@\"; do previous=$last; last=$argument; done; cp \"$previous\" \"$last\"")
 	writeExecutable(t, tools.otaFromTarget, "cp \"$3\" \"$4\"")
-	if _, err := signTargetFiles(context.Background(), targetFiles, keysDir, "", t.TempDir(), "product", false, tools); err != nil {
+	if _, err := signTargetFiles(context.Background(), targetFiles, keysDir, "", t.TempDir(), "product", true, false, tools); err != nil {
 		t.Fatalf("sign with managed APEX keys: %v", err)
 	}
 	args, err := os.ReadFile(argsFile)
@@ -276,7 +277,21 @@ func TestSigningBuildOptions(t *testing.T) {
 		t.Fatalf("sign path = %q", options.SignPath)
 	}
 	for _, args := range [][]string{
+		{"--sign-keys", "keys", "uwu-f"},
+		{"--sign-keys", "keys", "uwu", "uwu-f"},
+	} {
+		options, err = ParseOptions(args)
+		if err != nil {
+			t.Fatalf("signed release target %v failed: %v", args, err)
+		}
+		if !reflect.DeepEqual(options.Targets, []string{"target-files-package", "otatools"}) ||
+			strings.Contains(strings.Join(options.BuildArgs, " "), "updatepackage") {
+			t.Fatalf("signed release target %v produced unexpected options: %+v", args, options)
+		}
+	}
+	for _, args := range [][]string{
 		{"--sign-keys", "keys", "--trust-output", "otapackage"},
+		{"--sign-keys", "keys", "updatepackage"},
 		{"--sign-check"},
 		{"--sign-keys", "keys", "--sign-check", "otapackage"},
 		{"--sign-path", "Sign.Out", "otapackage"},
@@ -284,6 +299,51 @@ func TestSigningBuildOptions(t *testing.T) {
 		if _, err := ParseOptions(args); err == nil {
 			t.Fatalf("unsafe signing options accepted: %v", args)
 		}
+	}
+}
+
+func TestSignTargetFilesCanSkipOTA(t *testing.T) {
+	directory := t.TempDir()
+	keys := filepath.Join(directory, "keys")
+	if err := os.Mkdir(keys, 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeSigningKeys(t, keys)
+	targetFiles := filepath.Join(directory, "target_files.zip")
+	writeSigningTargetFiles(t, targetFiles)
+	tools := signingTools{signTargetFiles: filepath.Join(directory, "sign_target_files_apks")}
+	writeExecutable(t, tools.signTargetFiles, "previous=; last=; for argument in \"$@\"; do previous=$last; last=$argument; done; cp \"$previous\" \"$last\"")
+	result, err := signTargetFiles(context.Background(), targetFiles, keys, "", t.TempDir(), "product", false, false, tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SignedOTA != "" || result.Checksum != "" {
+		t.Fatalf("OTA was generated for a fastboot-only signing run: %+v", result)
+	}
+	if info, err := os.Stat(result.SignedTargetFiles); err != nil || info.Size() == 0 {
+		t.Fatalf("missing signed target-files: %v", err)
+	}
+}
+
+func TestBuildSignedFastbootPackage(t *testing.T) {
+	directory := t.TempDir()
+	targetFiles := filepath.Join(directory, "signed-target_files.zip")
+	if err := os.WriteFile(targetFiles, []byte("signed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tools := signingTools{
+		imgFromTarget:    filepath.Join(directory, "img_from_target_files"),
+		buildSuperImage:  filepath.Join(directory, "build_super_image"),
+		workingDirectory: directory,
+	}
+	writeExecutable(t, tools.imgFromTarget, "previous=; last=; for argument in \"$@\"; do previous=$last; last=$argument; done; cp \"$previous\" \"$last\"")
+	writeExecutable(t, tools.buildSuperImage, "exit 0")
+	output, err := buildSignedFastbootPackage(context.Background(), targetFiles, directory, "uwu_fuxi", tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(output); err != nil || info.Size() == 0 || !strings.Contains(filepath.Base(output), "-img-signed-") {
+		t.Fatalf("missing signed fastboot package %q: %v", output, err)
 	}
 }
 
@@ -303,7 +363,7 @@ func TestSignTargetFilesUsesIsolatedOutput(t *testing.T) {
 	writeExecutable(t, tools.signTargetFiles, "cp \"$4\" \"$5\"")
 	writeExecutable(t, tools.otaFromTarget, "cp \"$3\" \"$4\"")
 	output := filepath.Join(directory, "release", "product", "checks", "run")
-	result, err := signTargetFiles(context.Background(), targetFiles, keys, "", output, "product", true, tools)
+	result, err := signTargetFiles(context.Background(), targetFiles, keys, "", output, "product", true, true, tools)
 	if err != nil {
 		t.Fatal(err)
 	}

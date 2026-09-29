@@ -54,6 +54,48 @@ func TestParseOptionsModuleBuild(t *testing.T) {
 	}
 }
 
+func TestParseOptionsReleasePackageAliases(t *testing.T) {
+	tests := []struct {
+		alias  string
+		mode   string
+		target string
+	}{
+		{alias: "uwu", mode: packageModeOTA, target: "otapackage"},
+		{alias: "uwu-f", mode: packageModeFastboot, target: "updatepackage"},
+	}
+	for _, test := range tests {
+		options, err := ParseOptions([]string{"-j12", test.alias})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !options.FullBuild || options.PackageMode != test.mode ||
+			!reflect.DeepEqual(options.Targets, []string{test.target}) ||
+			!reflect.DeepEqual(options.BuildArgs, []string{"-j12", test.target}) {
+			t.Fatalf("%s produced unexpected options: %+v", test.alias, options)
+		}
+	}
+	combined, err := ParseOptions([]string{"uwu", "uwu-f"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if combined.PackageMode != packageModeBoth ||
+		!reflect.DeepEqual(combined.Targets, []string{"otapackage", "updatepackage"}) {
+		t.Fatalf("combined release packages produced unexpected options: %+v", combined)
+	}
+	for _, args := range [][]string{{"uwu", "uwu"}, {"uwu-f", "uwu-f"}, {"uwu", "SystemUI"}, {"uwu-f", "updatepackage"}} {
+		if _, err := ParseOptions(args); err == nil {
+			t.Fatalf("conflicting release package arguments were accepted: %v", args)
+		}
+	}
+	signed, err := ParseOptions([]string{"--sign-keys", "keys", "uwu"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signed.PackageMode != packageModeOTA || !reflect.DeepEqual(signed.Targets, []string{"target-files-package", "otatools"}) {
+		t.Fatalf("signed uwu produced unexpected options: %+v", signed)
+	}
+}
+
 func TestParseOptionsCanDisableDebugReport(t *testing.T) {
 	options, err := ParseOptions([]string{"--no-debug", "SystemUI"})
 	if err != nil {

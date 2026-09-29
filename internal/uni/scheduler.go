@@ -320,10 +320,16 @@ func formatBuildOutput(state State) string {
 	return "uni: output=" + state.ProductOut
 }
 
-func printBuildComplete(started time.Time, summary buildSummary, state State) {
+func printBuildComplete(started time.Time, summary buildSummary, state State, packagePaths []string) {
 	fmt.Println()
 	fmt.Println(formatBuildSummary(summary))
-	fmt.Println(formatBuildOutput(state))
+	if len(packagePaths) > 0 {
+		for _, packagePath := range packagePaths {
+			fmt.Println("uni: package=" + packagePath)
+		}
+	} else {
+		fmt.Println(formatBuildOutput(state))
+	}
 	fmt.Printf("\033[0;32m%s\033[0m\n", formatBuildComplete(time.Since(started)))
 }
 
@@ -546,7 +552,7 @@ func Run(ctx context.Context, options Options) error {
 		if err == nil {
 			report.event("build result=success phases=%d min_mem_available=%s swap_out=%s",
 				summary.phases, formatBytes(summary.minimumAvailable), formatBytes(int64(summary.swapOutBytes)))
-			printBuildComplete(started, summary, state)
+			printBuildComplete(started, summary, state, nil)
 		}
 		return err
 	}
@@ -725,6 +731,7 @@ func Run(ctx context.Context, options Options) error {
 	}
 	err = nil
 	if err == nil {
+		var signedOTA, signedFastboot, checksum string
 		if historyErr := recordBuildHistory(top, state, runner, summary); historyErr != nil {
 			fmt.Fprintf(os.Stderr, "uni: build history warning: %v\n", historyErr)
 			report.event("history result=warning error=%q", historyErr)
@@ -736,13 +743,28 @@ func Run(ctx context.Context, options Options) error {
 			if signingErr != nil {
 				return fmt.Errorf("sign build: %w", signingErr)
 			}
-			report.event("signing check=false source=%s target_files=%s ota=%s checksum=%s", result.SourceTargetFiles, result.SignedTargetFiles, result.SignedOTA, result.Checksum)
-			fmt.Printf("uni: signed package=%s\n", result.SignedOTA)
-			fmt.Printf("uni: checksum=%s\n", result.Checksum)
+			report.event("signing check=false source=%s target_files=%s ota=%s fastboot=%s checksum=%s", result.SourceTargetFiles, result.SignedTargetFiles, result.SignedOTA, result.SignedFastboot, result.Checksum)
+			signedOTA, signedFastboot, checksum = result.SignedOTA, result.SignedFastboot, result.Checksum
+			if options.PackageMode == "" {
+				fmt.Printf("uni: signed package=%s\n", signedOTA)
+				fmt.Printf("uni: checksum=%s\n", checksum)
+			}
+		}
+		published, publishErr := publishReleasePackages(state, options, signedOTA, signedFastboot, checksum)
+		if publishErr != nil {
+			return fmt.Errorf("publish release package: %w", publishErr)
+		}
+		packagePaths := make([]string, 0, len(published))
+		for _, packageOutput := range published {
+			packagePaths = append(packagePaths, packageOutput.path)
+			report.event("package mode=%s path=%s checksum=%s", options.PackageMode, packageOutput.path, packageOutput.checksum)
+			if packageOutput.checksum != "" {
+				fmt.Printf("uni: checksum=%s\n", packageOutput.checksum)
+			}
 		}
 		report.event("build result=success phases=%d min_mem_available=%s swap_out=%s",
 			summary.phases, formatBytes(summary.minimumAvailable), formatBytes(int64(summary.swapOutBytes)))
-		printBuildComplete(started, summary, state)
+		printBuildComplete(started, summary, state, packagePaths)
 	}
 	return err
 }

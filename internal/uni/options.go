@@ -46,8 +46,15 @@ type Options struct {
 	SignConfig      string
 	SignPath        string
 	SignCheck       bool
+	PackageMode     string
 	Targets         []string
 }
+
+const (
+	packageModeOTA      = "ota"
+	packageModeFastboot = "fastboot"
+	packageModeBoth     = "both"
+)
 
 func Usage() string {
 	locale := ""
@@ -88,9 +95,16 @@ Options:
   showcommands         Print executed build commands
   -h, --help           Show this help
 
+Release targets:
+  uwu                  Build otapackage and publish an uwuAOSP-named OTA
+  uwu-f                Build updatepackage and publish an uwuAOSP-named fastboot package
+
 Examples:
   uni
   uni -j8 otapackage
+  uni -j12 uwu
+  uni -j12 uwu-f
+  uni -j12 uwu uwu-f
   uni SystemUI
   uni --debug -j8 otapackage
 `
@@ -121,9 +135,16 @@ const usageChinese = `用法: uni [选项] [目标...]
   showcommands         输出实际执行的构建命令
   -h, --help           显示帮助
 
+发布目标:
+  uwu                  构建 otapackage，并输出 uwuAOSP 命名的 OTA 包
+  uwu-f                构建 updatepackage，并输出 uwuAOSP 命名的 fastboot 包
+
 示例:
   uni
   uni -j8 otapackage
+  uni -j12 uwu
+  uni -j12 uwu-f
+  uni -j12 uwu uwu-f
   uni SystemUI
   uni --debug -j8 otapackage
 `
@@ -277,6 +298,24 @@ func ParseOptions(args []string) (Options, error) {
 		case "showcommands":
 			options.ShowCommands = true
 			continue
+		case "uwu", "uwu-f":
+			target := "otapackage"
+			mode := packageModeOTA
+			if arg == "uwu-f" {
+				target = "updatepackage"
+				mode = packageModeFastboot
+			}
+			if options.PackageMode == mode || options.PackageMode == packageModeBoth {
+				return Options{}, fmt.Errorf("%s was specified more than once", arg)
+			}
+			if options.PackageMode == "" {
+				options.PackageMode = mode
+			} else {
+				options.PackageMode = packageModeBoth
+			}
+			options.BuildArgs = append(options.BuildArgs, target)
+			options.Targets = append(options.Targets, target)
+			continue
 		}
 		if value, matched, err := customValue(args, &i, "--batch-size"); matched {
 			if err != nil {
@@ -424,10 +463,17 @@ func ParseOptions(args []string) (Options, error) {
 	} else {
 		for _, target := range options.Targets {
 			switch target {
-			case "droid", "droidcore", "otapackage":
+			case "droid", "droidcore", "otapackage", "updatepackage":
 				options.FullBuild = true
 			}
 		}
+	}
+	expectedPackageTargets := 1
+	if options.PackageMode == packageModeBoth {
+		expectedPackageTargets = 2
+	}
+	if options.PackageMode != "" && len(options.Targets) != expectedPackageTargets {
+		return Options{}, fmt.Errorf("uwu and uwu-f cannot be combined with other build targets")
 	}
 	if options.Dev && options.DevAutoSet && options.DevAuto {
 		return Options{}, fmt.Errorf("--dev and --dev-auto cannot be used together")

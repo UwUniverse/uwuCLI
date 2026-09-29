@@ -27,6 +27,8 @@ type signingConfig struct {
 type signingTools struct {
 	signTargetFiles  string
 	otaFromTarget    string
+	imgFromTarget    string
+	buildSuperImage  string
 	workingDirectory string
 }
 
@@ -34,19 +36,25 @@ type signingResult struct {
 	SourceTargetFiles string
 	SignedTargetFiles string
 	SignedOTA         string
+	SignedFastboot    string
 	Checksum          string
 	Check             bool
 }
 
 func signingBuildOptions(options Options) (Options, error) {
 	for _, target := range options.Targets {
-		if target != "otapackage" {
-			return Options{}, fmt.Errorf("--sign-keys only supports otapackage")
+		if target == "otapackage" {
+			continue
 		}
+		if target == "updatepackage" &&
+			(options.PackageMode == packageModeFastboot || options.PackageMode == packageModeBoth) {
+			continue
+		}
+		return Options{}, fmt.Errorf("--sign-keys supports otapackage, uwu, and uwu-f")
 	}
 	args := make([]string, 0, len(options.BuildArgs)+2)
 	for _, arg := range options.BuildArgs {
-		if arg != "otapackage" {
+		if arg != "otapackage" && arg != "updatepackage" {
 			args = append(args, arg)
 		}
 	}
@@ -61,6 +69,8 @@ func signingToolPaths(top, outDir string) signingTools {
 	return signingTools{
 		signTargetFiles:  filepath.Join(bin, "sign_target_files_apks"),
 		otaFromTarget:    filepath.Join(bin, "ota_from_target_files"),
+		imgFromTarget:    filepath.Join(bin, "img_from_target_files"),
+		buildSuperImage:  filepath.Join(bin, "build_super_image"),
 		workingDirectory: top,
 	}
 }
@@ -248,7 +258,7 @@ func writeSigningChecksum(path string) (string, error) {
 	return checksum, nil
 }
 
-func signTargetFiles(ctx context.Context, targetFiles, keysDir, configPath, outputDir, product string, check bool, tools signingTools) (signingResult, error) {
+func signTargetFiles(ctx context.Context, targetFiles, keysDir, configPath, outputDir, product string, generateOTA, check bool, tools signingTools) (signingResult, error) {
 	keysDir, err := validateSigningKeysDirectory(keysDir)
 	if err != nil {
 		return signingResult{}, err
@@ -256,7 +266,11 @@ func signTargetFiles(ctx context.Context, targetFiles, keysDir, configPath, outp
 	if err := verifyTargetFiles(targetFiles); err != nil {
 		return signingResult{}, err
 	}
-	for _, tool := range []string{tools.signTargetFiles, tools.otaFromTarget} {
+	requiredTools := []string{tools.signTargetFiles}
+	if generateOTA {
+		requiredTools = append(requiredTools, tools.otaFromTarget)
+	}
+	for _, tool := range requiredTools {
 		if info, err := os.Stat(tool); err != nil || info.Mode()&0111 == 0 {
 			return signingResult{}, fmt.Errorf("missing executable signing tool: %s", tool)
 		}
@@ -283,19 +297,49 @@ func signTargetFiles(ctx context.Context, targetFiles, keysDir, configPath, outp
 	if err := signingCommand(ctx, tools.signTargetFiles, tools.workingDirectory, args...); err != nil {
 		return signingResult{}, err
 	}
-	if err := signingCommand(ctx, tools.otaFromTarget, tools.workingDirectory, "-k", filepath.Join(keysDir, "releasekey"), signedTargetFiles, signedOTA); err != nil {
-		return signingResult{}, err
+	artifacts := []string{signedTargetFiles}
+	if generateOTA {
+		if err := signingCommand(ctx, tools.otaFromTarget, tools.workingDirectory, "-k", filepath.Join(keysDir, "releasekey"), signedTargetFiles, signedOTA); err != nil {
+			return signingResult{}, err
+		}
+		artifacts = append(artifacts, signedOTA)
+	} else {
+		signedOTA = ""
 	}
-	for _, artifact := range []string{signedTargetFiles, signedOTA} {
+	for _, artifact := range artifacts {
 		if info, err := os.Stat(artifact); err != nil || info.Size() == 0 {
 			return signingResult{}, fmt.Errorf("signing tool did not create %s", artifact)
 		}
 	}
-	checksum, err := writeSigningChecksum(signedOTA)
-	if err != nil {
-		return signingResult{}, fmt.Errorf("write OTA checksum: %w", err)
+	checksum := ""
+	if generateOTA {
+		checksum, err = writeSigningChecksum(signedOTA)
+		if err != nil {
+			return signingResult{}, fmt.Errorf("write OTA checksum: %w", err)
+		}
 	}
 	return signingResult{SourceTargetFiles: targetFiles, SignedTargetFiles: signedTargetFiles, SignedOTA: signedOTA, Checksum: checksum, Check: check}, nil
+}
+
+func buildSignedFastbootPackage(ctx context.Context, signedTargetFiles, outputDir, product string, tools signingTools) (string, error) {
+	for _, tool := range []string{tools.imgFromTarget, tools.buildSuperImage} {
+		if info, err := os.Stat(tool); err != nil || info.Mode()&0111 == 0 {
+			return "", fmt.Errorf("missing executable signing tool: %s", tool)
+		}
+	}
+	output := filepath.Join(outputDir, product+"-img-signed-"+time.Now().Format("20060102-150405")+".zip")
+	args := []string{
+		"--additional", "IMAGES/VerifiedBootParams.textproto:VerifiedBootParams.textproto",
+		"--build_super_image", tools.buildSuperImage,
+		signedTargetFiles, output,
+	}
+	if err := signingCommand(ctx, tools.imgFromTarget, tools.workingDirectory, args...); err != nil {
+		return "", err
+	}
+	if info, err := os.Stat(output); err != nil || info.Size() == 0 {
+		return "", fmt.Errorf("fastboot packaging tool did not create %s", output)
+	}
+	return output, nil
 }
 
 func runSigning(ctx context.Context, top, outDir string, state State, options Options) (signingResult, error) {
@@ -308,5 +352,27 @@ func runSigning(ctx context.Context, top, outDir string, state State, options Op
 		return signingResult{}, err
 	}
 	fmt.Printf("uni: signing output: %s\n", outputDir)
-	return signTargetFiles(ctx, targetFiles, options.SignKeys, options.SignConfig, outputDir, state.TargetProduct, options.SignCheck, signingToolPaths(top, outDir))
+	modes, err := packageModes(options.PackageMode)
+	if err != nil {
+		return signingResult{}, err
+	}
+	generateOTA := len(modes) == 0
+	generateFastboot := false
+	for _, mode := range modes {
+		generateOTA = generateOTA || mode == packageModeOTA
+		generateFastboot = generateFastboot || mode == packageModeFastboot
+	}
+	tools := signingToolPaths(top, outDir)
+	result, err := signTargetFiles(ctx, targetFiles, options.SignKeys, options.SignConfig, outputDir,
+		state.TargetProduct, generateOTA, options.SignCheck, tools)
+	if err != nil {
+		return signingResult{}, err
+	}
+	if generateFastboot {
+		result.SignedFastboot, err = buildSignedFastbootPackage(ctx, result.SignedTargetFiles, outputDir, state.TargetProduct, tools)
+		if err != nil {
+			return signingResult{}, err
+		}
+	}
+	return result, nil
 }
