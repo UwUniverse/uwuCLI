@@ -346,6 +346,21 @@ func (runner *commandRunner) probeCgroup(ctx context.Context) bool {
 	return cmd.Run() == nil
 }
 
+func soongModulePathsReady(outDir string) bool {
+	for _, name := range []string{
+		"AndroidProducts.mk.list",
+		"Android.bp.list",
+		"Android.mk.list",
+		"configuration.list",
+	} {
+		info, err := os.Stat(filepath.Join(outDir, ".module_paths", name))
+		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func (runner *commandRunner) run(ctx context.Context, mode, phase, statePath string, args []string, maxJobs int) (SegmentSample, error) {
 	return runner.runWithTelemetry(ctx, mode, phase, statePath, args, maxJobs, 0, true, nil, nil, nil, nil)
 }
@@ -385,10 +400,14 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 		"TOP=" + runner.top,
 		"ORIGINAL_PWD=" + runner.top,
 		"NETWORK_FILE_SYSTEM_TYPE=local",
-		"_SOONG_INTERNAL_NO_FINDER=true",
 		"UNI_STATE_FILE=" + statePath,
 		"UNI_R8_MODULES_FILE=" + filepath.Join(filepath.Dir(statePath), "soong_r8_modules.txt"),
 		"UNI_NINJA_PHASE=" + phase,
+	}
+	// soong_ui only skips its source finder when the product and module lists
+	// already exist. A missing out/.module_paths makes kati unable to see products.
+	if soongModulePathsReady(runner.outDir) {
+		overrides = append(overrides, "_SOONG_INTERNAL_NO_FINDER=true")
 	}
 	analysisMemoryLimit := int64(0)
 	analysisGCPercent := 0

@@ -18,6 +18,31 @@ import (
 	"time"
 )
 
+func TestSoongModulePathsReady(t *testing.T) {
+	dir := t.TempDir()
+	if soongModulePathsReady(dir) {
+		t.Fatal("missing module paths were treated as ready")
+	}
+	listDir := filepath.Join(dir, ".module_paths")
+	if err := os.MkdirAll(listDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"AndroidProducts.mk.list", "Android.bp.list", "Android.mk.list"} {
+		if err := os.WriteFile(filepath.Join(listDir, name), []byte("device/sample\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if soongModulePathsReady(dir) {
+		t.Fatal("incomplete module paths were treated as ready")
+	}
+	if err := os.WriteFile(filepath.Join(listDir, "configuration.list"), []byte("device/sample/BoardConfig.mk\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !soongModulePathsReady(dir) {
+		t.Fatal("complete module paths were not ready")
+	}
+}
+
 func TestOverrideEnvironment(t *testing.T) {
 	base := []string{"A=old", "B=keep", "A=duplicate"}
 	got := overrideEnvironment(base, "A=new", "C=value")
