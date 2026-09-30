@@ -6,6 +6,7 @@ package uni
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,12 +37,30 @@ func TestShouldUseCompactTUI(t *testing.T) {
 }
 
 func TestParseCompactProgress(t *testing.T) {
-	percent, done, total, ok := parseCompactProgress("[ 68% 156383/229745] //module:target r8 [common]")
+	line := "[ 68% 156383/229745 4h8m3s remaining] //module:target r8 [common]"
+	percent, done, total, ok := parseCompactProgress(line)
 	if !ok || percent != 68 || done != 156383 || total != 229745 {
 		t.Fatalf("unexpected progress: %d %d/%d ok=%t", percent, done, total, ok)
 	}
+	if eta := parseCompactETA(line); eta != "4h8m3s" {
+		t.Fatalf("ETA = %q, want 4h8m3s", eta)
+	}
 	if _, _, _, ok := parseCompactProgress("ordinary compiler output"); ok {
 		t.Fatal("ordinary output must not be parsed as progress")
+	}
+	if eta := parseCompactETA("[ 68% 156383/229745] module"); eta != "" {
+		t.Fatalf("unexpected ETA without estimate: %q", eta)
+	}
+}
+
+func TestCompactColorRespectsTerminalAndNoColor(t *testing.T) {
+	if !compactColorEnabled([]string{"TERM=xterm-256color"}) {
+		t.Fatal("supported terminal should enable semantic colors")
+	}
+	for _, environment := range [][]string{{"TERM=xterm", "NO_COLOR=1"}, {"TERM=dumb"}, {"TERM="}} {
+		if compactColorEnabled(environment) {
+			t.Fatalf("colors should be disabled for %v", environment)
+		}
 	}
 }
 
@@ -87,8 +106,8 @@ func TestCompactDisplayLinePreservesColorsAndProgress(t *testing.T) {
 	if !strings.Contains(frame, "\x1b[32m[100% 1/1] bootstrap blueprint\x1b[0m") {
 		t.Fatalf("frame lost colored progress line: %q", frame)
 	}
-	if !strings.HasSuffix(frame, "\x1b[0m") {
-		t.Fatalf("latest output is not the final TUI line: %q", frame)
+	if !strings.Contains(frame, "  \x1b[32m") {
+		t.Fatalf("latest output line is missing from the TUI page: %q", frame)
 	}
 }
 
@@ -132,6 +151,123 @@ func TestCompactTUITracksPhaseProgressAndTelemetry(t *testing.T) {
 	tui.phaseFinished("ninja", nil)
 	if task.status != compactTaskDone {
 		t.Fatalf("task status=%v, want done", task.status)
+	}
+}
+
+func TestCompactTUIShowsSemanticColorsAndETA(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	tui.color = true
+	tui.phaseStarted("ninja", 9)
+	tui.consume("[ 79% 15175/19054 4m2s remaining] target")
+	frame := tui.frame(true)
+	if !strings.Contains(frame, "\x1b[1;36m") || !strings.Contains(frame, "eta 4m2s") {
+		t.Fatalf("running state color or ETA is missing: %q", frame)
+	}
+	tui.phaseFinished("ninja", nil)
+	if frame := tui.frame(true); !strings.Contains(frame, "\x1b[32m") {
+		t.Fatalf("completed state color is missing: %q", frame)
+	}
+	tui.phaseStarted("ninja", 9)
+	tui.phaseFinished("ninja", fmt.Errorf("failure"))
+	if frame := tui.frame(true); !strings.Contains(frame, "\x1b[1;31m") {
+		t.Fatalf("failed state color is missing: %q", frame)
+	}
+}
+
+func TestCompactTUIShowsStructuredRunningActionsAndElapsedTime(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	tui.messages = compactMessagesForLocale(false)
+	tui.phaseStarted("ninja", 18)
+	tui.consumeStatusEvent(compactStatusEvent{Type: "total", Total: 23}, 1)
+	tui.consumeStatusEvent(compactStatusEvent{
+		Type:                  "estimate",
+		EstimatedTimeUnixNano: time.Now().Add(5 * time.Minute).UnixNano(),
+	}, 1)
+	tui.consumeStatusEvent(compactStatusEvent{
+		Type:            "start",
+		ID:              7,
+		Description:     "compile framework component",
+		StartedUnixNano: time.Now().Add(-75 * time.Second).UnixNano(),
+	}, 1)
+	frame := tui.frame(true)
+	if !strings.Contains(frame, "1:15 compile framework component") ||
+		!strings.Contains(frame, "[  0% 0/23 ") || !strings.Contains(frame, "remaining] compile framework component") {
+		t.Fatalf("structured action details missing from frame: %q", frame)
+	}
+	pageLines := strings.Split(frame, "\n")
+	if len(pageLines) != 24 || strings.Trim(pageLines[16], "=") != "" ||
+		!strings.Contains(pageLines[17], "[  0% 0/23") ||
+		!strings.Contains(pageLines[18], "compile framework component") ||
+		!strings.Contains(pageLines[23], "Ctrl+C Stop") {
+		t.Fatalf("bottom pane order should be divider, status, tasks, controls: %q", frame)
+	}
+	tui.color = true
+	frame = tui.frame(true)
+	styleTUI := newCompactTUI(nil, nil)
+	styleTUI.color = true
+	styleTUI.phaseStarted("ninja", 9)
+	styleTUI.consumeStatusEvent(compactStatusEvent{
+		Type:            "start",
+		ID:              9,
+		Description:     "quick target",
+		StartedUnixNano: time.Now().UnixNano(),
+	}, 1)
+	styleFrame := styleTUI.frame(true)
+	for _, style := range []string{"\x1b[1;36mR8\x1b[0m", "\x1b[1;36m"} {
+		if !strings.Contains(styleFrame, style) {
+			t.Errorf("expected bold/color emphasis %q in frame: %q", style, styleFrame)
+		}
+	}
+	if !strings.Contains(styleFrame, "0:00 quick target") {
+		t.Errorf("short action timer is missing: %q", styleFrame)
+	}
+	if !strings.Contains(frame, "\x1b[1;31m") {
+		t.Errorf("expected long-running action warning color in frame: %q", frame)
+	}
+	tui.consumeStatusEvent(compactStatusEvent{Type: "finish", ID: 7}, 1)
+	if len(tui.actions) != 0 || tui.byName["Main"].done != 1 || tui.byName["Main"].total != 23 {
+		t.Fatalf("finish event did not update action/progress state: actions=%v task=%+v", tui.actions, tui.byName["Main"])
+	}
+	tui.consumeStatusEvent(compactStatusEvent{Type: "reset"}, 2)
+	if tui.byName["Main"].done != 0 || tui.byName["Main"].total != 0 {
+		t.Fatalf("new Ninja segment did not reset its counters: %+v", tui.byName["Main"])
+	}
+}
+
+func TestCompactStatusServerAcceptsJSONEvents(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	server, err := startCompactStatusServer(tui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := net.Dial("unix", server.socket)
+	if err != nil {
+		server.close()
+		t.Fatal(err)
+	}
+	_, err = fmt.Fprintln(connection, `{"type":"start","id":4,"description":"compile test target"}`)
+	if err != nil {
+		connection.Close()
+		server.close()
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		tui.mu.Lock()
+		started := len(tui.actions) == 1
+		tui.mu.Unlock()
+		if started {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	tui.mu.Lock()
+	started := len(tui.actions) == 1 && tui.actions[0].description == "compile test target"
+	tui.mu.Unlock()
+	_ = connection.Close()
+	server.close()
+	if !started || len(tui.actions) != 0 {
+		t.Fatalf("status event or disconnect cleanup failed: started=%t actions=%+v", started, tui.actions)
 	}
 }
 
@@ -208,10 +344,7 @@ func TestCompactTUIClearRenderedFrameRemovesDashboard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "\r\x1b[J"
-	if rendered > 1 {
-		want = fmt.Sprintf("\r\x1b[%dA\x1b[J", rendered-1)
-	}
+	want := "\x1b[r\x1b[?1006l\x1b[?1000l\x1b[<u\x1b[?25h"
 	if !strings.HasSuffix(string(data), want) {
 		t.Fatalf("dashboard was not cleared: rendered=%d output=%q", rendered, data)
 	}
@@ -368,8 +501,8 @@ func TestCompactTUIFrameDoesNotClearExistingTerminalOutput(t *testing.T) {
 	if strings.Contains(frame, "\x1b[2J") || strings.Contains(frame, "\x1b[H") {
 		t.Fatalf("frame clears output printed before uni: %q", frame)
 	}
-	if strings.HasSuffix(frame, "\n") {
-		t.Fatalf("inline frame must keep the cursor on its final row: %q", frame)
+	if lines := compactFrameLines(frame); lines != 24 {
+		t.Fatalf("full-screen frame has %d rows, want 24", lines)
 	}
 }
 
@@ -388,8 +521,65 @@ func TestCompactTUIRenderDoesNotScrollOnRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "\x1b[6A\x1b[1G") {
-		t.Fatalf("refresh did not return to the previous frame: %q", data)
+	if strings.Count(string(data), "\x1b[1;16r") != 2 || strings.Count(string(data), "\x1b[1;1H") < 2 {
+		t.Fatalf("refresh did not redraw the pinned full-screen layout: %q", data)
+	}
+}
+
+func TestCompactActionPaneScalesWithTerminalHeight(t *testing.T) {
+	for rows, want := range map[int]int{24: 8, 18: 6, 17: 5, 2: 0} {
+		if got := compactActionPaneHeight(rows); got != want {
+			t.Errorf("pane height for %d rows = %d, want %d", rows, got, want)
+		}
+	}
+	if got := compactActionPaneHeight(24) - 3; got != 5 {
+		t.Fatalf("24-row terminal exposes %d task rows, want minimum of 5", got)
+	}
+}
+
+func TestCompactActionPaneColorsOnlyLongRunningTimers(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	tui.color = true
+	tui.actions = []compactRunningAction{
+		{description: "yellow target", started: time.Now().Add(-31 * time.Second)},
+		{description: "red target", started: time.Now().Add(-61 * time.Second)},
+	}
+	rows := compactActionPane(tui, 5, 80, 77)
+	if !strings.Contains(rows[2], "\x1b[1;33m 0:31 \x1b[0m") || !strings.Contains(rows[2], "yellow target") {
+		t.Fatalf("30-second timer warning is missing: %q", rows[2])
+	}
+	if !strings.Contains(rows[3], "\x1b[1;31m 1:01 \x1b[0m") || !strings.Contains(rows[3], "red target") {
+		t.Fatalf("60-second timer warning is missing: %q", rows[3])
+	}
+	if strings.Contains(strings.Split(rows[2], "\x1b[0m")[1], "\x1b[") ||
+		strings.Contains(strings.Split(rows[3], "\x1b[0m")[1], "\x1b[") {
+		t.Fatal("action descriptions should remain uncolored after the elapsed-time emphasis")
+	}
+	if len(rows[0]) != 80 || !strings.Contains(rows[4], "Ctrl+C Stop") {
+		t.Fatalf("full-width divider or bottom operation bar missing: %q", rows)
+	}
+}
+
+func TestCompactActionPaneStatusRowIsUnindentedAndBoldWithoutColor(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	tui.color = false
+	tui.phaseStarted("ninja", 8)
+	rows := compactActionPane(tui, 3, 80, 77)
+	plain := sanitizeCompactLine(rows[1])
+	if strings.HasPrefix(plain, " ") {
+		t.Fatalf("status row has leading indentation: %q", rows[1])
+	}
+	if !strings.HasPrefix(rows[1], "\x1b[1m") || !strings.Contains(plain, tui.messages.building) {
+		t.Fatalf("status row should remain bold without color: %q", rows[1])
+	}
+}
+
+func TestCompactSoongProgressLineMatchesMFormat(t *testing.T) {
+	task := &compactTask{done: 533, total: 2584, eta: "1m23s"}
+	got := compactSoongProgressLine(task, "//vendor:module link libmodule.so", "fallback")
+	want := "[ 20% 533/2584 1m23s remaining] //vendor:module link libmodule.so"
+	if got != want {
+		t.Fatalf("Soong progress line = %q, want %q", got, want)
 	}
 }
 
@@ -399,7 +589,14 @@ func TestCompactTUIFrameReservesTerminalColumn(t *testing.T) {
 	tui.consume("[ 96% 302/312] " + strings.Repeat("module/", 30))
 	frame := tui.frame(true)
 	for _, line := range strings.Split(strings.TrimSuffix(frame, "\n"), "\n") {
-		if compactTextWidth(sanitizeCompactLine(line)) >= 100 {
+		lineWidth := compactTextWidth(sanitizeCompactLine(line))
+		if line != "" && strings.Trim(line, "=") == "" {
+			if lineWidth != 100 {
+				t.Fatalf("separator width=%d, want 100 columns: %q", lineWidth, line)
+			}
+			continue
+		}
+		if lineWidth >= 100 {
 			t.Fatalf("frame line can wrap at terminal width: %q", line)
 		}
 	}

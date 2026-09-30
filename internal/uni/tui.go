@@ -49,6 +49,9 @@ type compactTask struct {
 	percent  int
 	done     int
 	total    int
+	eta      string
+	etaAt    time.Time
+	finished int
 	activity string
 	latest   string
 	logs     compactRing
@@ -58,6 +61,12 @@ type compactRing struct {
 	lines []string
 	next  int
 	full  bool
+}
+
+type compactRunningAction struct {
+	id          string
+	description string
+	started     time.Time
 }
 
 func (ring *compactRing) len() int {
@@ -110,26 +119,33 @@ func (ring *compactRing) recent(limit int) []string {
 type compactTUIContextKey struct{}
 
 type compactTUI struct {
-	mu           sync.Mutex
-	renderMu     sync.Mutex
-	terminal     *os.File
-	input        *os.File
-	tasks        []*compactTask
-	byName       map[string]*compactTask
-	active       *compactTask
-	selected     int
-	details      bool
-	r8           int
-	memory       int64
-	spinner      int
-	spinnerAt    time.Time
-	copyMode     bool
-	dirty        bool
-	rendered     int
-	scrollPaused bool
-	scrollOffset int
-	summaries    []string
-	messages     compactMessages
+	mu                  sync.Mutex
+	renderMu            sync.Mutex
+	terminal            *os.File
+	input               *os.File
+	tasks               []*compactTask
+	byName              map[string]*compactTask
+	active              *compactTask
+	selected            int
+	details             bool
+	r8                  int
+	memory              int64
+	spinner             int
+	spinnerAt           time.Time
+	copyMode            bool
+	dirty               bool
+	rendered            int
+	scrollPaused        bool
+	scrollOffset        int
+	summaries           []string
+	messages            compactMessages
+	color               bool
+	statusSocket        string
+	actions             []compactRunningAction
+	progressDescription string
+	actionTick          time.Time
+	terminalSize        terminalSize
+	altScreen           bool
 
 	stop      chan struct{}
 	done      chan struct{}
@@ -206,18 +222,28 @@ func compactChineseLocale() bool {
 	return false
 }
 
+func compactColorEnabled(environment []string) bool {
+	if _, set := environmentValue(environment, "NO_COLOR"); set {
+		return false
+	}
+	term, _ := environmentValue(environment, "TERM")
+	return term != "" && !strings.EqualFold(term, "dumb")
+}
+
 func newCompactTUI(input, terminal *os.File) *compactTUI {
 	names := []string{"Graph", "Main"}
-	messages := compactMessagesForLocale(false)
+	messages := compactMessagesForLocale(compactChineseLocale())
 	tui := &compactTUI{
-		terminal:  terminal,
-		input:     input,
-		byName:    make(map[string]*compactTask, len(names)),
-		stop:      make(chan struct{}),
-		done:      make(chan struct{}),
-		dirty:     true,
-		spinnerAt: time.Now(),
-		messages:  messages,
+		terminal:     terminal,
+		input:        input,
+		byName:       make(map[string]*compactTask, len(names)),
+		stop:         make(chan struct{}),
+		done:         make(chan struct{}),
+		dirty:        true,
+		spinnerAt:    time.Now(),
+		messages:     messages,
+		color:        compactColorEnabled(os.Environ()),
+		terminalSize: compactTerminalSize(terminal),
 	}
 	for _, name := range names {
 		task := &compactTask{name: name, label: messages.taskLabels[name], status: compactTaskPending, logs: newCompactRing(compactTUILogLines)}
@@ -263,6 +289,9 @@ func (tui *compactTUI) phaseStarted(phase string, jobs int) {
 		task.percent = 0
 		task.done = 0
 		task.total = 0
+		task.eta = ""
+		task.etaAt = time.Time{}
+		task.finished = 0
 		task.activity = ""
 	}
 	task.status = compactTaskRunning
@@ -376,6 +405,14 @@ func (tui *compactTUI) consume(line string) {
 		target.percent = percent
 		target.done = done
 		target.total = total
+		target.eta = parseCompactETA(line)
+		if target.eta != "" {
+			if duration, err := time.ParseDuration(target.eta); err == nil {
+				target.etaAt = time.Now().Add(duration)
+			}
+		} else {
+			target.etaAt = time.Time{}
+		}
 	}
 	if strings.HasPrefix(line, "uni: phases=") || strings.HasPrefix(line, "uni: package=") ||
 		strings.HasPrefix(line, "uni: output=") || strings.HasPrefix(line, "#### build completed successfully") {
@@ -387,6 +424,73 @@ func (tui *compactTUI) consume(line string) {
 	}
 	if strings.HasPrefix(line, "FAILED:") || strings.HasPrefix(line, "FAILED ") || strings.Contains(line, "ninja failed") {
 		tui.summaries = append(tui.summaries, line)
+	}
+	tui.dirty = true
+}
+
+func (tui *compactTUI) consumeStatusEvent(event compactStatusEvent, connectionID uint64) {
+	tui.mu.Lock()
+	defer tui.mu.Unlock()
+	task := tui.active
+	if task == nil {
+		task = tui.byName["Main"]
+	}
+	switch event.Type {
+	case "reset":
+		task.percent = 0
+		task.done = 0
+		task.total = 0
+		task.eta = ""
+		task.etaAt = time.Time{}
+		task.finished = 0
+		tui.progressDescription = ""
+	case "total":
+		if event.Total > 0 {
+			task.total = event.Total
+			task.done = task.finished
+			task.percent = task.done * 100 / event.Total
+		}
+	case "estimate":
+		if event.EstimatedTimeUnixNano > 0 {
+			task.etaAt = time.Unix(0, event.EstimatedTimeUnixNano)
+			task.eta = ""
+		}
+	case "start":
+		started := time.Now()
+		if event.StartedUnixNano > 0 {
+			started = time.Unix(0, event.StartedUnixNano)
+		}
+		tui.actions = append(tui.actions, compactRunningAction{
+			id:          fmt.Sprintf("%d:%d", connectionID, event.ID),
+			description: sanitizeCompactLine(event.Description),
+			started:     started,
+		})
+		tui.progressDescription = sanitizeCompactLine(event.Description)
+	case "finish":
+		id := fmt.Sprintf("%d:%d", connectionID, event.ID)
+		for index := range tui.actions {
+			if tui.actions[index].id == id {
+				tui.actions = append(tui.actions[:index], tui.actions[index+1:]...)
+				break
+			}
+		}
+		task.finished++
+		task.done = task.finished
+		if task.total > 0 {
+			task.percent = task.done * 100 / task.total
+		}
+		if event.Description != "" {
+			tui.progressDescription = sanitizeCompactLine(event.Description)
+		}
+	case "disconnect":
+		prefix := fmt.Sprintf("%d:", connectionID)
+		for index := 0; index < len(tui.actions); {
+			if strings.HasPrefix(tui.actions[index].id, prefix) {
+				tui.actions = append(tui.actions[:index], tui.actions[index+1:]...)
+				continue
+			}
+			index++
+		}
 	}
 	tui.dirty = true
 }
@@ -449,6 +553,29 @@ func parseCompactProgress(line string) (percent, done, total int, ok bool) {
 		offset = close + 1
 	}
 	return 0, 0, 0, false
+}
+
+func parseCompactETA(line string) string {
+	for offset := 0; offset < len(line); {
+		open := strings.IndexByte(line[offset:], '[')
+		if open < 0 {
+			return ""
+		}
+		open += offset
+		close := strings.IndexByte(line[open+1:], ']')
+		if close < 0 {
+			return ""
+		}
+		close += open + 1
+		fields := strings.Fields(line[open+1 : close])
+		if len(fields) >= 3 && strings.HasSuffix(fields[0], "%") && strings.Contains(fields[1], "/") {
+			if _, err := time.ParseDuration(fields[2]); err == nil {
+				return fields[2]
+			}
+		}
+		offset = close + 1
+	}
+	return ""
 }
 
 func sanitizeCompactLine(line string) string {
@@ -573,6 +700,20 @@ func compactPadRight(text string, width int) string {
 	return text
 }
 
+func compactANSI(enabled bool, style, value string) string {
+	if !enabled || value == "" {
+		return value
+	}
+	return "\x1b[" + style + "m" + value + "\x1b[0m"
+}
+
+func compactBold(value string) string {
+	if value == "" {
+		return value
+	}
+	return "\x1b[1m" + value + "\x1b[0m"
+}
+
 func (tui *compactTUI) taskLine(task *compactTask) string {
 	duration := task.duration
 	if task.status == compactTaskRunning && !task.started.IsZero() {
@@ -597,6 +738,15 @@ func (tui *compactTUI) taskLine(task *compactTask) string {
 		if task.total > 0 {
 			line += fmt.Sprintf("  %d%% %d/%d", task.percent, task.done, task.total)
 		}
+		if task.eta != "" {
+			line += fmt.Sprintf("  %s %s", tui.messages.remaining, task.eta)
+		} else if !task.etaAt.IsZero() {
+			remaining := time.Until(task.etaAt)
+			if remaining < 0 {
+				remaining = 0
+			}
+			line += fmt.Sprintf("  %s %s", tui.messages.remaining, compactDuration(remaining))
+		}
 		return line
 	default:
 		return fmt.Sprintf("%s □ %s", prefix, tui.messages.pending)
@@ -611,70 +761,210 @@ func (tui *compactTUI) frame(force bool) string {
 	}
 	tui.dirty = false
 	size := compactTerminalSize(tui.terminal)
+	tui.terminalSize = size
 	width := int(size.cols)
 	if width < 40 {
 		width = 40
 	}
 	lineWidth := width - 3
-	var output strings.Builder
-	output.WriteString(truncateCompactLine(tui.messages.header, lineWidth))
-	output.WriteByte('\n')
+	rows := int(size.rows)
+	if rows < 1 {
+		rows = 24
+	}
+	paneHeight := compactActionPaneHeight(rows)
+	bodyHeight := rows - paneHeight
+	if bodyHeight < 0 {
+		bodyHeight = 0
+	}
+	body := make([]string, 0, bodyHeight)
+	header := truncateCompactLine(tui.messages.header, lineWidth)
+	if tui.color {
+		header = "\x1b[1;36m" + header + "\x1b[0m"
+	}
+	body = append(body, header)
 	for index, task := range tui.tasks {
 		marker := "  "
 		if index == tui.selected {
 			marker = "→ "
 		}
 		line := truncateCompactLine(marker+tui.taskLine(task), lineWidth)
-		output.WriteString(line)
-		output.WriteByte('\n')
+		if tui.color {
+			style := "2"
+			switch task.status {
+			case compactTaskRunning:
+				style = "1;36"
+			case compactTaskDone:
+				style = "32"
+			case compactTaskFailed:
+				style = "1;31"
+			}
+			line = "\x1b[" + style + "m" + line + "\x1b[0m"
+		}
+		body = append(body, line)
 	}
 	r8Status := fmt.Sprintf("□ %s", tui.messages.idle)
 	if tui.r8 > 0 {
 		r8Status = fmt.Sprintf("%d %s", tui.r8, tui.messages.running)
 	}
-	output.WriteString(truncateCompactLine(fmt.Sprintf("  R8        %s", r8Status), lineWidth))
-	output.WriteByte('\n')
-	output.WriteString(truncateCompactLine(fmt.Sprintf("  %s %s %s", compactPadRight(tui.messages.memory, 9), compactMemory(tui.memory), tui.messages.available), lineWidth))
-	output.WriteByte('\n')
+	r8Line := truncateCompactLine(fmt.Sprintf("  R8        %s", r8Status), lineWidth)
+	r8Line = strings.Replace(r8Line, "R8", compactANSI(tui.color, "1;36", "R8"), 1)
+	body = append(body, r8Line)
+	memoryLabel := compactPadRight(tui.messages.memory, 9)
+	memoryValue := compactMemory(tui.memory)
+	memoryLine := truncateCompactLine(fmt.Sprintf("  %s %s %s", memoryLabel, memoryValue, tui.messages.available), lineWidth)
+	memoryLine = strings.Replace(memoryLine, memoryLabel, compactANSI(tui.color, "1;36", memoryLabel), 1)
+	memoryLine = strings.Replace(memoryLine, memoryValue, compactANSI(tui.color, "1", memoryValue), 1)
+	body = append(body, memoryLine)
+	if len(body) > bodyHeight {
+		body = body[:bodyHeight]
+	}
+	if bodyHeight > len(body) {
+		body = append(body, make([]string, bodyHeight-len(body))...)
+	}
+	var latestLine string
+	if tui.active != nil && tui.active.latest != "" && (!tui.details || tui.scrollOffset == 0) {
+		latestLine = truncateCompactDisplayLine(tui.active.latest, lineWidth-2)
+		latestLine = "  " + latestLine
+	}
 	if tui.details {
-		output.WriteByte('\n')
-		available := int(size.rows) - 11
-		if available < 3 {
-			available = 3
+		logStart := len(tui.tasks) + 3
+		logEnd := bodyHeight
+		if logStart < logEnd && tui.selected >= 0 && tui.selected < len(tui.tasks) {
+			ring := &tui.tasks[tui.selected].logs
+			lineCount := ring.len()
+			if tui.scrollOffset > lineCount {
+				tui.scrollOffset = lineCount
+			}
+			available := logEnd - logStart
+			lines := ring.recent(available + tui.scrollOffset)
+			end := len(lines) - tui.scrollOffset
+			if end < 0 {
+				end = 0
+			}
+			start := end - available
+			if start < 0 {
+				start = 0
+			}
+			for index, line := range lines[start:end] {
+				body[logStart+index] = truncateCompactLine(line, lineWidth)
+			}
 		}
-		ring := &tui.tasks[tui.selected].logs
-		lineCount := ring.len()
-		if tui.scrollOffset > lineCount {
-			tui.scrollOffset = lineCount
+	} else if latestLine != "" && bodyHeight > 0 {
+		body[bodyHeight-1] = latestLine
+	}
+
+	page := append([]string(nil), body...)
+	if paneHeight > 0 {
+		page = append(page, compactActionPane(tui, paneHeight, width, lineWidth)...)
+	}
+	return strings.Join(page, "\n")
+}
+
+func compactActionPaneHeight(rows int) int {
+	if rows < 3 {
+		return 0
+	}
+	return rows / 3
+}
+
+func compactSoongProgressLine(task *compactTask, description string, fallback string) string {
+	if task == nil || task.total <= 0 {
+		if description != "" {
+			return description
 		}
-		lines := ring.recent(available + tui.scrollOffset)
-		end := len(lines) - tui.scrollOffset
-		if end < 0 {
-			end = 0
+		return fallback
+	}
+	percent := task.done * 100 / task.total
+	line := fmt.Sprintf("[%3d%% %d/%d", percent, task.done, task.total)
+	eta := task.eta
+	if eta == "" && !task.etaAt.IsZero() {
+		remaining := time.Until(task.etaAt).Round(time.Second)
+		if remaining < 0 {
+			remaining = 0
 		}
-		start := end - available
-		if start < 0 {
-			start = 0
-		}
-		for _, line := range lines[start:end] {
-			output.WriteString(truncateCompactLine(line, lineWidth))
-			output.WriteByte('\n')
+		eta = remaining.String()
+	}
+	if eta != "" {
+		line += " " + eta + " remaining"
+	}
+	line += "]"
+	if description != "" {
+		line += " " + description
+	}
+	return line
+}
+
+func compactActionPane(tui *compactTUI, height, width, lineWidth int) []string {
+	if height < 1 {
+		return nil
+	}
+	rows := make([]string, height)
+	rows[0] = strings.Repeat("=", width)
+	var current *compactTask
+	if tui.active != nil {
+		current = tui.active
+	} else {
+		for _, task := range tui.tasks {
+			if task.status == compactTaskRunning {
+				current = task
+				break
+			}
 		}
 	}
-	output.WriteByte('\n')
+	if current == nil && len(tui.tasks) > 0 {
+		current = tui.tasks[len(tui.tasks)-1]
+	}
+	if height > 1 && current != nil {
+		status := compactSoongProgressLine(current, tui.progressDescription, tui.taskLine(current))
+		line := truncateCompactLine(strings.TrimLeft(status, " "), lineWidth)
+		style := "1"
+		if current.status == compactTaskRunning {
+			style = "1;36"
+		} else if current.status == compactTaskFailed {
+			style = "1;31"
+		} else if current.status == compactTaskDone {
+			style = "1;32"
+		}
+		if tui.color {
+			rows[1] = compactANSI(true, style, line)
+		} else {
+			rows[1] = compactBold(line)
+		}
+	}
+	visibleActions := height - 3
+	if visibleActions > len(tui.actions) {
+		visibleActions = len(tui.actions)
+	}
+	for index := 0; index < visibleActions; index++ {
+		action := tui.actions[index]
+		elapsed := time.Since(action.started).Round(time.Second)
+		if elapsed < 0 {
+			elapsed = 0
+		}
+		seconds := int(elapsed.Seconds())
+		duration := fmt.Sprintf("%2d:%02d ", seconds/60, seconds%60)
+		description := action.description
+		if description == "" {
+			description = "action"
+		}
+		line := truncateCompactLine("   "+duration+description, lineWidth)
+		style := ""
+		if tui.color && seconds >= 60 {
+			style = "1;31"
+		} else if tui.color && seconds >= 30 {
+			style = "1;33"
+		}
+		if style != "" {
+			line = strings.Replace(line, duration, compactANSI(true, style, duration), 1)
+		}
+		rows[index+2] = line
+	}
 	footer := tui.messages.footer
 	if tui.copyMode {
 		footer = tui.messages.copyFooter
 	}
-	output.WriteString(truncateCompactLine(footer, lineWidth))
-	output.WriteByte('\n')
-	if tui.active != nil && tui.active.latest != "" && (!tui.details || tui.scrollOffset == 0) {
-		latest := truncateCompactDisplayLine(tui.active.latest, lineWidth-2)
-		output.WriteString("  ")
-		output.WriteString(latest)
-		output.WriteByte('\n')
-	}
-	return strings.TrimSuffix(output.String(), "\n")
+	rows[height-1] = compactANSI(tui.color, "2", truncateCompactLine(footer, lineWidth))
+	return rows
 }
 
 func compactFrameLines(frame string) int {
@@ -702,24 +992,25 @@ func (tui *compactTUI) render(force bool) {
 	if frame == "" || tui.terminal == nil {
 		return
 	}
-	previousRendered := tui.rendered
-	prefix := "\x1b[1G"
-	if previousRendered > 1 {
-		prefix = fmt.Sprintf("\x1b[%dA\x1b[1G", previousRendered-1)
-	}
+	lines := strings.Split(frame, "\n")
 	var output strings.Builder
-	output.Grow(len(prefix) + len(frame) + previousRendered*4)
-	output.WriteString(prefix)
-	for index, line := range strings.Split(frame, "\n") {
-		if index > 0 {
-			output.WriteByte('\n')
-		}
-		output.WriteString("\x1b[2K\x1b[1G")
+	output.Grow(len(frame) + len(lines)*16)
+	rows := int(tui.terminalSize.rows)
+	if rows < len(lines) {
+		rows = len(lines)
+	}
+	bodyRows := rows - compactActionPaneHeight(rows)
+	if bodyRows < 1 {
+		bodyRows = rows
+	}
+	output.WriteString(fmt.Sprintf("\x1b[1;%dr", bodyRows))
+	for index, line := range lines {
+		output.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[2K", index+1))
 		output.WriteString(line)
 	}
-	output.WriteString("\x1b[J")
+	output.WriteString(fmt.Sprintf("\x1b[%d;1H", bodyRows))
 	_, _ = io.WriteString(tui.terminal, output.String())
-	tui.rendered = compactFrameLines(frame)
+	tui.rendered = len(lines)
 }
 
 func (tui *compactTUI) animate() {
@@ -729,6 +1020,18 @@ func (tui *compactTUI) animate() {
 		return
 	}
 	shouldRender := tui.dirty
+	now := time.Now()
+	size := compactTerminalSize(tui.terminal)
+	if size != tui.terminalSize {
+		tui.terminalSize = size
+		tui.dirty = true
+		shouldRender = true
+	}
+	if len(tui.actions) > 0 && now.Sub(tui.actionTick) >= time.Second {
+		tui.actionTick = now
+		tui.dirty = true
+		shouldRender = true
+	}
 	if !tui.scrollPaused {
 		for _, task := range tui.tasks {
 			if task.status == compactTaskRunning {
@@ -749,7 +1052,8 @@ func (tui *compactTUI) animate() {
 }
 
 func (tui *compactTUI) start() {
-	_, _ = io.WriteString(tui.terminal, "\x1b[>1u\x1b[?25l\x1b[?1000h\x1b[?1006h")
+	_, _ = io.WriteString(tui.terminal, "\x1b[?1049h\x1b[>1u\x1b[?25l\x1b[?1000h\x1b[?1006h")
+	tui.altScreen = true
 	tui.render(true)
 	go tui.inputLoop()
 	go func() {
@@ -1090,7 +1394,6 @@ func (tui *compactTUI) close() {
 	tui.once.Do(func() { close(tui.stop) })
 	<-tui.done
 	tui.clearRenderedFrame()
-	_, _ = io.WriteString(tui.terminal, "\x1b[?1006l\x1b[?1000l\x1b[<u\x1b[?25h")
 }
 
 func (tui *compactTUI) clearRenderedFrame() {
@@ -1100,17 +1403,13 @@ func (tui *compactTUI) clearRenderedFrame() {
 	tui.renderMu.Lock()
 	defer tui.renderMu.Unlock()
 	tui.mu.Lock()
-	rendered := tui.rendered
 	tui.rendered = 0
 	tui.mu.Unlock()
-	if rendered < 1 {
-		return
+	_, _ = io.WriteString(tui.terminal, "\x1b[r\x1b[?1006l\x1b[?1000l\x1b[<u\x1b[?25h")
+	if tui.altScreen {
+		_, _ = io.WriteString(tui.terminal, "\x1b[?1049l")
+		tui.altScreen = false
 	}
-	if rendered == 1 {
-		_, _ = io.WriteString(tui.terminal, "\r\x1b[J")
-		return
-	}
-	_, _ = fmt.Fprintf(tui.terminal, "\r\x1b[%dA\x1b[J", rendered-1)
 }
 
 func (tui *compactTUI) summaryLines() []string {
@@ -1200,7 +1499,7 @@ func RunWithCompactTUI(ctx context.Context, options Options) (runErr error) {
 	if err != nil {
 		return Run(ctx, options)
 	}
-	messages := compactMessagesForLocale(false)
+	messages := compactMessagesForLocale(compactChineseLocale())
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, messages.fallback, err)
 		return Run(ctx, options)
@@ -1230,6 +1529,12 @@ func RunWithCompactTUI(ctx context.Context, options Options) (runErr error) {
 
 	originalStdout, originalStderr := os.Stdout, os.Stderr
 	tui := newCompactTUI(os.Stdin, originalStdout)
+	statusServer, statusErr := startCompactStatusServer(tui)
+	if statusErr == nil {
+		tui.statusSocket = statusServer.socket
+	} else {
+		fmt.Fprintf(originalStderr, "uni: live action status unavailable: %v\n", statusErr)
+	}
 	tui.interrupt = func() {
 		if process, err := os.FindProcess(os.Getpid()); err == nil {
 			_ = process.Signal(os.Interrupt)
@@ -1245,6 +1550,9 @@ func RunWithCompactTUI(ctx context.Context, options Options) (runErr error) {
 		_ = writer.Close()
 		captureErr := waitCompactCapture(captured, reader, compactTUICaptureTimeout)
 		_ = logFile.Close()
+		if statusServer != nil {
+			statusServer.close()
+		}
 		tui.finish(runErr)
 		tui.render(true)
 		tui.close()

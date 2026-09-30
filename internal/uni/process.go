@@ -411,6 +411,9 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 	if soongModulePathsReady(runner.outDir) {
 		overrides = append(overrides, "_SOONG_INTERNAL_NO_FINDER=true")
 	}
+	if tui != nil && tui.statusSocket != "" {
+		overrides = append(overrides, "UNI_STATUS_SOCKET="+tui.statusSocket)
+	}
 	analysisMemoryLimit := int64(0)
 	analysisGCPercent := 0
 	if mode == "--uni-prepare-mode" {
