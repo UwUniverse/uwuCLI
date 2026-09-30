@@ -182,12 +182,18 @@ func TestPressureGuardUsesSwapOnlyWithLowMemoryAndPSI(t *testing.T) {
 	if guard.observe(start.Add(2*time.Second), low, 5, activeSwap, false) {
 		t.Fatal("swap activity alone started pressure response without PSI stalls")
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 30; i++ {
 		if guard.observe(start.Add(time.Duration(4+2*i)*time.Second), low, 15, activeSwap, false) {
-			t.Fatal("transient swap pressure stopped the build")
+			t.Fatal("moderate PSI and swap activity reduced healthy throughput")
 		}
 	}
-	if !guard.observe(start.Add(10*time.Second), low, 15, activeSwap, false) {
+	severeStart := start.Add(time.Minute + 4*time.Second)
+	for i := 0; i < 10; i++ {
+		if guard.observe(severeStart.Add(time.Duration(2*i)*time.Second), low, 25, activeSwap, false) {
+			t.Fatal("brief swap pressure reduced parallelism")
+		}
+	}
+	if !guard.observe(severeStart.Add(20*time.Second), low, 25, activeSwap, false) {
 		t.Fatal("sustained low-memory PSI and swap activity was ignored")
 	}
 }

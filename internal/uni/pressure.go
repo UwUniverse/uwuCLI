@@ -23,6 +23,8 @@ const (
 	runaParallelismRampMaxPSI   = 10.0
 	runaSwapInPressureRate      = 4 * 1024 * 1024  // 240 MiB/min
 	runaSwapOutPressureRate     = 16 * 1024 * 1024 // 960 MiB/min
+	memoryPressureDuration      = 20 * time.Second
+	memorySevereDuration        = 6 * time.Second
 )
 
 type swapRates struct {
@@ -122,7 +124,7 @@ func (guard *memoryPressureGuard) observe(now time.Time, memory MemorySnapshot, 
 	}
 	reserve := max(3*gibibyte, memory.Total/8)
 	pressured := memory.Available < reserve && fullAvg10 >= 20
-	if memory.Available < memory.Total/3 && fullAvg10 >= runaParallelismRampMaxPSI && swap.active() {
+	if memory.Available < memory.Total/3 && fullAvg10 >= 20 && swap.active() {
 		pressured = true
 	}
 	if memory.Available < memory.Total/3 && fullAvg10 >= 45 {
@@ -141,7 +143,14 @@ func (guard *memoryPressureGuard) observe(now time.Time, memory MemorySnapshot, 
 	if guard.since.IsZero() {
 		guard.since = now
 	}
-	return now.Sub(guard.since) >= 6*time.Second
+	duration := memoryPressureDuration
+	if fullAvg10 >= 45 || (linkerHeavy && fullAvg10 >= 35) {
+		duration = memorySevereDuration
+	}
+	if memory.Available < gibibyte/2 {
+		duration = 2 * time.Second
+	}
+	return now.Sub(guard.since) >= duration
 }
 
 type memoryRecoveryGuard struct {

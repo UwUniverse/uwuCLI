@@ -52,6 +52,29 @@ func TestNinjaToolSourceNewer(t *testing.T) {
 	}
 }
 
+func TestPrepareAssumeExistingExecutorPreservesExplicitBinary(t *testing.T) {
+	directory := t.TempDir()
+	binary := filepath.Join(directory, "executor")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s\\n' 'assumeexisting, except API validation outputs'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	runner := &commandRunner{top: directory, phasedNinja: "runa", baseEnv: []string{"UNI_NINJA_BIN=" + binary}}
+	selected, err := runner.prepareAssumeExistingExecutor(directory)
+	if err != nil || selected != binary {
+		t.Fatalf("selected executor = %q, error = %v", selected, err)
+	}
+}
+
+func TestVerifyAssumeExistingRejectsUnsafeCapability(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "executor")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s\\n' 'assumeexisting trust unlogged outputs'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if verifyAssumeExistingNinja(binary) == nil {
+		t.Fatal("accepted executor without API-safe reuse")
+	}
+}
+
 func TestEnsureAssumeExistingNinjaIntegration(t *testing.T) {
 	top := os.Getenv("UNI_TEST_TOP")
 	if top == "" {
@@ -65,6 +88,37 @@ func TestEnsureAssumeExistingNinjaIntegration(t *testing.T) {
 	if err := verifyAssumeExistingNinja(path); err != nil {
 		t.Fatal(err)
 	}
+	checkAssumeExistingBehavior(t, path)
+	checkRuntimeAdmission(t, path)
+	checkExecutorOptions(t, path)
+	checkAssumeExistingRunner(t, top, path)
+	checkNormalNinjaRunner(t, top, outDir, path)
+}
+
+func TestRunaAssumeExistingIntegration(t *testing.T) {
+	top := os.Getenv("UNI_TEST_TOP")
+	if top == "" {
+		t.Skip("UNI_TEST_TOP is not set")
+	}
+	path := os.Getenv("UNI_TEST_RUNA")
+	var err error
+	if path == "" {
+		path, err = resolveExecutorPath("runa", top)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyAssumeExistingNinja(path); err != nil {
+		t.Fatal(err)
+	}
+	checkAssumeExistingBehavior(t, path)
+	checkRuntimeAdmission(t, path)
+	checkExecutorOptions(t, path)
+	checkAssumeExistingRunner(t, top, path)
+}
+
+func checkAssumeExistingBehavior(t *testing.T, path string) {
+	t.Helper()
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatal(err)

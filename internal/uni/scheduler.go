@@ -474,7 +474,7 @@ func Run(ctx context.Context, options Options) error {
 		runner.criticalPathSource, runner.incrementalAnalysis)
 	runner.trustOutput = options.TrustOutput
 	if options.AssumeExisting {
-		runner.assumeExistingNinja, err = ensureAssumeExistingNinja(top, outDir)
+		runner.assumeExistingNinja, err = runner.prepareAssumeExistingExecutor(outDir)
 		if err != nil {
 			return fmt.Errorf("prepare assume-existing Ninja: %w", err)
 		}

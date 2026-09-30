@@ -5,12 +5,14 @@ package uni
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func ninjaToolSourceNewer(sourceDir, binaryPath string) (bool, error) {
@@ -50,12 +52,30 @@ func ninjaToolSourceNewer(sourceDir, binaryPath string) (bool, error) {
 }
 
 func verifyAssumeExistingNinja(binaryPath string) error {
-	command := exec.Command(binaryPath, "-d", "list")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, binaryPath, "-d", "list")
 	output, _ := command.CombinedOutput()
-	if !bytes.Contains(output, []byte("assumeexisting")) {
-		return fmt.Errorf("custom Ninja does not expose assumeexisting mode")
+	if !bytes.Contains(output, []byte("assumeexisting")) ||
+		!bytes.Contains(output, []byte("except API validation outputs")) {
+		return fmt.Errorf("executor does not expose API-safe assumeexisting mode")
 	}
 	return nil
+}
+
+func (runner *commandRunner) prepareAssumeExistingExecutor(outDir string) (string, error) {
+	executor := runner.phasedNinja
+	if configured, _ := environmentValue(runner.baseEnv, "UNI_NINJA_BIN"); configured != "" {
+		executor = configured
+	}
+	if executor != "ninja" {
+		if binary, err := resolveExecutorPath(executor, runner.top); err == nil {
+			if verifyAssumeExistingNinja(binary) == nil {
+				return binary, nil
+			}
+		}
+	}
+	return ensureAssumeExistingNinja(runner.top, outDir)
 }
 
 func ensureAssumeExistingNinja(top, outDir string) (string, error) {
@@ -87,7 +107,7 @@ func ensureAssumeExistingNinja(top, outDir string) (string, error) {
 			return "", fmt.Errorf("required Ninja build tool is unavailable: %s", path)
 		}
 	}
-	fmt.Printf("uni: build assume-existing Ninja\n")
+	fmt.Printf("uni: build Ninja compatibility executor\n")
 	command := exec.Command(pythonPath, configurePath, "--bootstrap", "--with-python="+pythonPath)
 	command.Dir = buildDir
 	command.Stdout = os.Stdout
