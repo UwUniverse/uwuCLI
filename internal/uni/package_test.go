@@ -70,6 +70,39 @@ func TestPublishReleasePackages(t *testing.T) {
 	}
 }
 
+func TestReleaseMetadataUsesConfiguredUwuBuildDate(t *testing.T) {
+	tests := []struct {
+		name          string
+		uwuVersion    string
+		wantBuildDate string
+	}{
+		{name: "date only", uwuVersion: "17.0.100-20260929-UNOFFICIAL-fuxi", wantBuildDate: "20260929"},
+		{name: "time of day enabled", uwuVersion: "17.0.100-20260929_121957-UNOFFICIAL-fuxi", wantBuildDate: "20260929_121957"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			productOut := t.TempDir()
+			writeReleaseBuildProp(t, productOut)
+			buildProp := filepath.Join(productOut, "product", "etc", "build.prop")
+			data, err := os.ReadFile(buildProp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data = []byte(strings.Replace(string(data), "ro.uwu.build.version=ignored", "ro.uwu.version="+test.uwuVersion, 1))
+			if err := os.WriteFile(buildProp, data, 0644); err != nil {
+				t.Fatal(err)
+			}
+			metadata, err := releaseMetadata(productOut)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if metadata.date != test.wantBuildDate {
+				t.Fatalf("build date = %q, want %q", metadata.date, test.wantBuildDate)
+			}
+		})
+	}
+}
+
 func TestPublishSignedPackageRenamesChecksum(t *testing.T) {
 	productOut := t.TempDir()
 	writeReleaseBuildProp(t, productOut)

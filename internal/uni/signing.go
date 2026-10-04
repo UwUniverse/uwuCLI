@@ -61,6 +61,9 @@ func signingBuildOptions(options Options) (Options, error) {
 	options.BuildArgs = append(args, "target-files-package", "otatools")
 	options.Targets = []string{"target-files-package", "otatools"}
 	options.FullBuild = true
+	if options.PackageMode == "" {
+		options.PackageMode = packageModeOTA
+	}
 	return options, nil
 }
 

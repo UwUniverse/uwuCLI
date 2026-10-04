@@ -265,7 +265,8 @@ func TestSigningBuildOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !options.FullBuild || !strings.Contains(strings.Join(options.BuildArgs, " "), "target-files-package otatools") ||
+	if !options.FullBuild || options.PackageMode != packageModeOTA ||
+		!strings.Contains(strings.Join(options.BuildArgs, " "), "target-files-package otatools") ||
 		strings.Contains(strings.Join(options.BuildArgs, " "), "otapackage") {
 		t.Fatalf("unexpected signing build options: %+v", options)
 	}

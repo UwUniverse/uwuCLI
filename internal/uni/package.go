@@ -71,10 +71,13 @@ func releaseMetadata(productOut string) (releasePackageMetadata, error) {
 	}
 	metadata := releasePackageMetadata{
 		version:     version,
-		date:        time.Unix(timestamp, 0).UTC().Format("20060102"),
+		date:        uwuBuildDate(properties["ro.uwu.version"], version),
 		releaseType: properties["ro.uwu.releasetype"],
 		device:      properties["ro.uwu.device"],
 		signed:      strings.Contains(properties["ro.build.tags"], "release-keys"),
+	}
+	if metadata.date == "" {
+		metadata.date = time.Unix(timestamp, 0).UTC().Format("20060102")
 	}
 	for name, value := range map[string]string{
 		"version": metadata.version, "release type": metadata.releaseType, "device": metadata.device,
@@ -84,6 +87,24 @@ func releaseMetadata(productOut string) (releasePackageMetadata, error) {
 		}
 	}
 	return metadata, nil
+}
+
+func uwuBuildDate(version, release string) string {
+	prefix := release + "-"
+	if release == "" || !strings.HasPrefix(version, prefix) {
+		return ""
+	}
+	date, _, found := strings.Cut(strings.TrimPrefix(version, prefix), "-")
+	if !found {
+		return ""
+	}
+	for _, layout := range []string{"20060102", "20060102_150405"} {
+		parsed, err := time.Parse(layout, date)
+		if err == nil && parsed.Format(layout) == date {
+			return date
+		}
+	}
+	return ""
 }
 
 func validatePackageSegment(name, value string) error {
