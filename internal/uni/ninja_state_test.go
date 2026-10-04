@@ -60,14 +60,38 @@ func TestFilterNinjaLogKeepsRestatAPIOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	regularOutput := "out/not-restat.txt"
+	regularPath := filepath.Join(outDir, filepath.FromSlash(regularOutput))
+	if err := os.MkdirAll(filepath.Dir(regularPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(regularPath, []byte("ordinary output"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	regularInfo, err := os.Stat(regularPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	loggedMtime := info.ModTime().Add(time.Second).UnixNano()
-	data, err := readNinjaLog(writeTestNinjaLog(t, outDir, fmt.Sprintf(
-		"1\t2\t%d\t%s\thash", loggedMtime, filepath.ToSlash(output))))
+	data, err := readNinjaLog(writeTestNinjaLog(t, outDir,
+		fmt.Sprintf("1\t2\t%d\t%s\thash", loggedMtime, filepath.ToSlash(output)),
+		fmt.Sprintf("3\t4\t%d\t%s\thash", regularInfo.ModTime().Add(time.Second).UnixNano(), regularOutput)))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	filtered := filterNinjaLogByAPIOutputs(data, outDir, false)
+	filtered := filterNinjaLogByOutputs(data, outDir)
+	if _, ok := filtered.lines[output]; !ok {
+		t.Fatal("interrupted-output recovery discarded a valid Metalava restat output")
+	}
+	if _, ok := filtered.lines[regularOutput]; ok {
+		t.Fatal("interrupted-output recovery retained an ordinary output with mismatched mtime")
+	}
+	filtered = filterNinjaLogByInterruptedOutputs(filtered, outDir)
+	if _, ok := filtered.lines[output]; !ok {
+		t.Fatal("interrupted-output validation discarded a valid Metalava restat output")
+	}
+	filtered = filterNinjaLogByAPIOutputs(filtered, outDir, false)
 	if _, ok := filtered.lines[output]; !ok {
 		t.Fatal("restat API output with a newer logged input mtime was discarded")
 	}
@@ -100,10 +124,10 @@ func TestFilterNinjaLogDropsAPIOutputChangedAfterLog(t *testing.T) {
 	}
 }
 
-func writeTestNinjaLog(t *testing.T, outDir string, entry string) string {
+func writeTestNinjaLog(t *testing.T, outDir string, entries ...string) string {
 	t.Helper()
 	path := filepath.Join(outDir, ".test-ninja-log")
-	if err := os.WriteFile(path, []byte(testNinjaLog(entry)), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(testNinjaLog(entries...)), 0644); err != nil {
 		t.Fatal(err)
 	}
 	return path

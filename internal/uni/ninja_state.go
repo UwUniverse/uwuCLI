@@ -120,7 +120,13 @@ func filterNinjaLogByOutputs(data ninjaLogData, outDir string) ninjaLogData {
 			}
 		}
 		info, err := os.Stat(path)
-		if err != nil || info.ModTime().UnixNano() != loggedMtime {
+		if err != nil {
+			continue
+		}
+		outputMtime := info.ModTime().UnixNano()
+		// Metalava restat outputs can keep their old mtime while Ninja records
+		// the newer input mtime. Keep this exception limited to known API outputs.
+		if outputMtime != loggedMtime && !(outputMtime < loggedMtime && restatAPIOutput(output)) {
 			continue
 		}
 		filtered.order = append(filtered.order, output)
