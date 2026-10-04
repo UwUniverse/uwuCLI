@@ -303,6 +303,66 @@ func TestSigningBuildOptions(t *testing.T) {
 	}
 }
 
+func TestApplyVendorPrivateKeySigningPolicy(t *testing.T) {
+	top := t.TempDir()
+	privateKeysDir := filepath.Join(top, "vendor", "uwu-priv", "keys")
+	if err := os.MkdirAll(privateKeysDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name            string
+		options         Options
+		wantBuildArgs   []string
+		wantTargets     []string
+		wantSignKeys    string
+		wantSkipOTASign bool
+		wantError       bool
+	}{
+		{
+			name:          "OTA uses build system signing",
+			options:       Options{SignKeys: "external-keys", BuildArgs: []string{"-j18", "target-files-package", "otatools"}, Targets: []string{"target-files-package", "otatools"}, PackageMode: packageModeOTA},
+			wantBuildArgs: []string{"-j18", "otapackage"},
+			wantTargets:   []string{"otapackage"},
+		},
+		{
+			name:            "combined keeps fastboot signing only",
+			options:         Options{SignKeys: "external-keys", BuildArgs: []string{"target-files-package", "otatools"}, Targets: []string{"target-files-package", "otatools"}, PackageMode: packageModeBoth},
+			wantBuildArgs:   []string{"target-files-package", "otatools", "otapackage"},
+			wantTargets:     []string{"target-files-package", "otatools", "otapackage"},
+			wantSignKeys:    "external-keys",
+			wantSkipOTASign: true,
+		},
+		{
+			name:          "fastboot-only signing is unchanged",
+			options:       Options{SignKeys: "external-keys", BuildArgs: []string{"target-files-package", "otatools"}, Targets: []string{"target-files-package", "otatools"}, PackageMode: packageModeFastboot},
+			wantBuildArgs: []string{"target-files-package", "otatools"},
+			wantTargets:   []string{"target-files-package", "otatools"},
+			wantSignKeys:  "external-keys",
+		},
+		{
+			name:      "signing check is rejected",
+			options:   Options{SignKeys: "external-keys", SignCheck: true},
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			options, err := applyVendorPrivateKeySigningPolicy(top, test.options)
+			if (err != nil) != test.wantError {
+				t.Fatalf("error = %v, wantError %t", err, test.wantError)
+			}
+			if err != nil {
+				return
+			}
+			if !reflect.DeepEqual(options.BuildArgs, test.wantBuildArgs) ||
+				!reflect.DeepEqual(options.Targets, test.wantTargets) || options.SignKeys != test.wantSignKeys ||
+				options.SkipOTASigning != test.wantSkipOTASign {
+				t.Fatalf("unexpected policy result: options=%+v", options)
+			}
+		})
+	}
+}
+
 func TestSignTargetFilesCanSkipOTA(t *testing.T) {
 	directory := t.TempDir()
 	keys := filepath.Join(directory, "keys")

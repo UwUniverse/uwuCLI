@@ -47,6 +47,7 @@ type Options struct {
 	SignPath        string
 	SignCheck       bool
 	PackageMode     string
+	SkipOTASigning  bool
 	Targets         []string
 }
 

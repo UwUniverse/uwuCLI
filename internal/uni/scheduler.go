@@ -348,6 +348,10 @@ func Run(ctx context.Context, options Options) error {
 		fmt.Printf("uni: signing keys initialized: %s\n", keysDir)
 		return nil
 	}
+	options, err = applyVendorPrivateKeySigningPolicy(top, options)
+	if err != nil {
+		return err
+	}
 	if options.SignKeys != "" {
 		if _, err := validateSigningKeysDirectory(options.SignKeys); err != nil {
 			return err

@@ -67,6 +67,53 @@ func signingBuildOptions(options Options) (Options, error) {
 	return options, nil
 }
 
+func applyVendorPrivateKeySigningPolicy(top string, options Options) (Options, error) {
+	if options.SignKeys == "" {
+		return options, nil
+	}
+	privateKeysDir := filepath.Join(top, "vendor", "uwu-priv", "keys")
+	info, err := os.Stat(privateKeysDir)
+	if os.IsNotExist(err) {
+		return options, nil
+	}
+	if err != nil {
+		return options, fmt.Errorf("check vendor private signing keys %s: %w", privateKeysDir, err)
+	}
+	if !info.IsDir() {
+		return options, nil
+	}
+	if options.SignCheck {
+		return options, fmt.Errorf("vendor private signing keys exist at %s; Uni signing checks are disabled because the build system already signs OTA packages", privateKeysDir)
+	}
+
+	switch options.PackageMode {
+	case "", packageModeOTA:
+		buildArgs := make([]string, 0, len(options.BuildArgs))
+		for _, arg := range options.BuildArgs {
+			if arg != "target-files-package" && arg != "otatools" {
+				buildArgs = append(buildArgs, arg)
+			}
+		}
+		options.BuildArgs = append(buildArgs, "otapackage")
+		options.Targets = []string{"otapackage"}
+		options.PackageMode = packageModeOTA
+		options.SignKeys = ""
+		options.SignConfig = ""
+		options.SignPath = ""
+		fmt.Printf("uni: %s exists; using build-system OTA signing and skipping Uni OTA signing\n", privateKeysDir)
+	case packageModeBoth:
+		options.BuildArgs = append(options.BuildArgs, "otapackage")
+		options.Targets = append(options.Targets, "otapackage")
+		options.SkipOTASigning = true
+		fmt.Printf("uni: %s exists; using build-system OTA signing and keeping Uni fastboot signing only\n", privateKeysDir)
+	case packageModeFastboot:
+		return options, nil
+	default:
+		return options, fmt.Errorf("unknown package mode %q", options.PackageMode)
+	}
+	return options, nil
+}
+
 func signingToolPaths(top, outDir string) signingTools {
 	bin := filepath.Join(outDir, "host", "linux-x86", "bin")
 	return signingTools{
@@ -364,6 +411,9 @@ func runSigning(ctx context.Context, top, outDir string, state State, options Op
 	for _, mode := range modes {
 		generateOTA = generateOTA || mode == packageModeOTA
 		generateFastboot = generateFastboot || mode == packageModeFastboot
+	}
+	if options.SkipOTASigning {
+		generateOTA = false
 	}
 	tools := signingToolPaths(top, outDir)
 	result, err := signTargetFiles(ctx, targetFiles, options.SignKeys, options.SignConfig, outputDir,
