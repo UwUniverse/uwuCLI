@@ -57,7 +57,7 @@ func TestAdaptiveParallelismLowersAdmissionAndRetriesMissingControl(t *testing.T
 	}
 }
 
-func TestAdaptiveParallelismGraduallyRecoversWithinUserCeiling(t *testing.T) {
+func TestAdaptiveParallelismGraduallyRecoversWithinOneAndHalfTimesUserCeiling(t *testing.T) {
 	state := adaptiveParallelism{jobs: 14, ceiling: 18}
 	control := &testParallelismControl{}
 	memory := MemorySnapshot{Total: 32 * gibibyte, Available: 16 * gibibyte}
@@ -72,10 +72,11 @@ func TestAdaptiveParallelismGraduallyRecoversWithinUserCeiling(t *testing.T) {
 	if state.jobs != 17 {
 		t.Fatal("recovery did not use a bounded step")
 	}
-	state.observe(context.Background(), start.Add(30*time.Second), memory, 0, swapRates{}, false, control)
-	state.observe(context.Background(), start.Add(time.Minute), memory, 0, swapRates{}, false, control)
-	if state.jobs != 18 || len(control.requests) != 2 {
-		t.Fatal("recovery exceeded the user's requested jobs")
+	for _, elapsed := range []time.Duration{30, 45, 60, 75, 90} {
+		state.observe(context.Background(), start.Add(elapsed*time.Second), memory, 0, swapRates{}, false, control)
+	}
+	if state.jobs != 27 || len(control.requests) != 5 {
+		t.Fatalf("recovery did not reach 1.5x the user's requested jobs: jobs=%d requests=%v", state.jobs, control.requests)
 	}
 }
 

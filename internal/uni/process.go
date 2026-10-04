@@ -650,11 +650,11 @@ func (runner *commandRunner) runWithTelemetry(ctx context.Context, mode, phase, 
 						tui.updateParallelism(change.jobs)
 					}
 					fmt.Printf("uni: %s: admission parallelism %d -> %d (ceiling=%d, available=%s, memory PSI=%.1f); running tasks are preserved\n",
-						change.reason, change.previous, change.jobs, maxJobs, formatBytes(memory.Available), psi.full.avg10)
+						change.reason, change.previous, change.jobs, runaParallelismCeiling(maxJobs), formatBytes(memory.Available), psi.full.avg10)
 				}
 				if report != nil && change.reason != "" {
 					report.event("runtime_parallelism reason=%s previous=%d jobs=%d ceiling=%d available=%q psi_full_avg10=%.1f response=%q error=%q",
-						change.reason, change.previous, state.jobs, maxJobs, formatBytes(memory.Available), psi.full.avg10, change.response, fmt.Sprint(change.err))
+						change.reason, change.previous, state.jobs, runaParallelismCeiling(maxJobs), formatBytes(memory.Available), psi.full.avg10, change.response, fmt.Sprint(change.err))
 				}
 			}
 		}

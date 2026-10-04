@@ -71,7 +71,12 @@ func runaParallelismCeiling(inferredJobs int) int {
 	if inferredJobs < 1 {
 		return 0
 	}
-	return inferredJobs
+	half := inferredJobs / 2
+	maxInt := int(^uint(0) >> 1)
+	if inferredJobs > maxInt-half {
+		return maxInt
+	}
+	return inferredJobs + half
 }
 
 func (ramp *runaParallelismRamp) observe(now time.Time, memory MemorySnapshot, fullAvg10 float64, swap swapRates, currentJobs, inferredJobs int) (int, int, bool) {

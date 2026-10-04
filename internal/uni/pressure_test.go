@@ -34,19 +34,19 @@ func TestMemoryRetryJobs(t *testing.T) {
 	}
 }
 
-func TestRunaParallelismRampRestoresGraduallyToInferredJobs(t *testing.T) {
+func TestRunaParallelismRampRestoresGraduallyToOneAndHalfTimesInferredJobs(t *testing.T) {
 	start := time.Unix(100, 0)
 	memory := MemorySnapshot{Total: 32 * gibibyte, Available: 20 * gibibyte}
 	var ramp runaParallelismRamp
-	if jobs, ceiling, raised := ramp.observe(start, memory, 0, swapRates{}, 12, 18); raised || jobs != 12 || ceiling != 18 {
-		t.Fatalf("initial ramp observation = %d/%d/%t, want 12/18/false", jobs, ceiling, raised)
+	if jobs, ceiling, raised := ramp.observe(start, memory, 0, swapRates{}, 12, 18); raised || jobs != 12 || ceiling != 27 {
+		t.Fatalf("initial ramp observation = %d/%d/%t, want 12/27/false", jobs, ceiling, raised)
 	}
 	if jobs, _, raised := ramp.observe(start.Add(runaParallelismRampInterval-time.Second), memory, 0, swapRates{}, 12, 18); raised || jobs != 12 {
 		t.Fatalf("early ramp observation = %d/%t, want 12/false", jobs, raised)
 	}
 	jobs, ceiling, raised := ramp.observe(start.Add(runaParallelismRampInterval), memory, 0, swapRates{}, 12, 18)
-	if !raised || jobs != 15 || ceiling != 18 {
-		t.Fatalf("first ramp = %d/%d/%t, want 15/18/true", jobs, ceiling, raised)
+	if !raised || jobs != 15 || ceiling != 27 {
+		t.Fatalf("first ramp = %d/%d/%t, want 15/27/true", jobs, ceiling, raised)
 	}
 	now := start.Add(2 * runaParallelismRampInterval)
 	for jobs < ceiling {
@@ -57,14 +57,14 @@ func TestRunaParallelismRampRestoresGraduallyToInferredJobs(t *testing.T) {
 		}
 		now = now.Add(runaParallelismRampInterval)
 	}
-	if jobs != 18 {
-		t.Fatalf("ramp exceeded or missed ceiling: got %d, want 18", jobs)
+	if jobs != 27 {
+		t.Fatalf("ramp exceeded or missed ceiling: got %d, want 27", jobs)
 	}
-	if next, gotCeiling, increase := ramp.observe(now.Add(runaParallelismRampInterval), memory, 0, swapRates{}, jobs, 18); increase || next != 18 || gotCeiling != 18 {
-		t.Fatalf("at ceiling ramp = %d/%d/%t, want 18/18/false", next, gotCeiling, increase)
+	if next, gotCeiling, increase := ramp.observe(now.Add(runaParallelismRampInterval), memory, 0, swapRates{}, jobs, 18); increase || next != 27 || gotCeiling != 27 {
+		t.Fatalf("at ceiling ramp = %d/%d/%t, want 27/27/false", next, gotCeiling, increase)
 	}
-	if ceiling := runaParallelismCeiling(17); ceiling != 17 {
-		t.Fatalf("inferred job ceiling = %d, want 17", ceiling)
+	if ceiling := runaParallelismCeiling(17); ceiling != 25 {
+		t.Fatalf("inferred job ceiling = %d, want 25", ceiling)
 	}
 }
 
