@@ -166,9 +166,11 @@ func resolveSigningOutputDirectory(top, outDir, signPath string, check bool) (st
 }
 
 func signingArtifactNames(directory, product string) (string, string) {
-	stamp := time.Now().Format("20060102-150405")
-	return filepath.Join(directory, product+"-target_files-signed-"+stamp+".zip"),
-		filepath.Join(directory, product+"-ota-signed-"+stamp+".zip")
+	now := time.Now()
+	date := now.Format("20060102")
+	timestamp := now.Format("20060102-150405")
+	return filepath.Join(directory, product+"-target_files-signed-"+date+".zip"),
+		filepath.Join(directory, product+"-ota-signed-"+timestamp+".zip")
 }
 
 func findTargetFiles(productOut string) (string, error) {
