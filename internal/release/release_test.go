@@ -71,6 +71,85 @@ func TestCommitRelation(t *testing.T) {
 	}
 }
 
+func TestCheckRemoteHead(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	local := filepath.Join(root, "local")
+	runGit(t, root, "init", "--bare", "-b", "main", remote)
+	runGit(t, root, "init", "-b", "main", local)
+	runGit(t, local, "config", "user.name", "Test User")
+	runGit(t, local, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(local, "file"), []byte("first\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, local, "add", "file")
+	runGit(t, local, "commit", "-m", "first")
+	runGit(t, local, "remote", "add", "upstream", remote)
+	runGit(t, local, "push", "-u", "upstream", "main")
+
+	project := Project{Path: local, RelativePath: "local", Remote: "upstream"}
+	result := checkRemoteHead(project)
+	if result.Err != "" || result.LocalSHA1 == "" || result.LocalSHA1 != result.RemoteSHA1 {
+		t.Fatalf("expected local and remote HEADs to match, got %+v", result)
+	}
+	var out, errOut bytes.Buffer
+	compareRemoteHeads([]Project{project}, 1, "en", &out, &errOut)
+	if strings.Contains(out.String(), project.RelativePath) || !strings.Contains(out.String(), "match=1 mismatch=0 error=0") {
+		t.Fatalf("matching repository should be omitted while counted, got %q", out.String())
+	}
+
+	if err := os.WriteFile(filepath.Join(local, "file"), []byte("second\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, local, "commit", "-am", "second")
+	result = checkRemoteHead(project)
+	if result.Err != "" || result.LocalSHA1 == result.RemoteSHA1 {
+		t.Fatalf("expected local and remote HEADs to differ, got %+v", result)
+	}
+	out.Reset()
+	errOut.Reset()
+	previousStyle := releaseStyle
+	releaseStyle = outputStyle{
+		enabled: true,
+		reset:   "<reset>",
+		bold:    "<bold>",
+		dim:     "<dim>",
+		green:   "<green>",
+		red:     "<red>",
+		cyan:    "<cyan>",
+	}
+	defer func() { releaseStyle = previousStyle }()
+	compareRemoteHeads([]Project{project}, 1, "en", &out, &errOut)
+	if !strings.Contains(out.String(), "<red><bold>[MISMATCH]<reset>") ||
+		!strings.Contains(out.String(), project.RelativePath) ||
+		!strings.Contains(out.String(), "<red>1<reset>") ||
+		!strings.Contains(out.String(), "<cyan>"+result.RemoteSHA1+"<reset>") {
+		t.Fatalf("mismatching repository should remain visible, got %q", out.String())
+	}
+}
+
+func TestPrintProgressHidesCleanMatches(t *testing.T) {
+	var out, errOut bytes.Buffer
+	project := Project{RelativePath: "frameworks/base"}
+
+	printProgress(&out, &errOut, 1, 1, CheckResult{
+		Project: project,
+		Status:  "match",
+	})
+	if out.Len() != 0 || errOut.Len() != 0 {
+		t.Fatalf("clean match should be hidden, got stdout %q and stderr %q", out.String(), errOut.String())
+	}
+
+	printProgress(&out, &errOut, 1, 1, CheckResult{
+		Project: project,
+		Status:  "match",
+		Dirty:   true,
+	})
+	if !strings.Contains(out.String(), "[DIRTY]") || !strings.Contains(out.String(), project.RelativePath) {
+		t.Fatalf("dirty match should remain visible, got %q", out.String())
+	}
+}
+
 func TestParseSelection(t *testing.T) {
 	if got, _ := ParseSelection("1,3-4", 4); !equalInts(got, []int{0, 2, 3}) {
 		t.Fatalf("selection = %v", got)
@@ -92,6 +171,16 @@ func TestManifestMayPrecedeOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	if options.Manifest != "manifest.xml" || !options.SkipPull || options.Jobs != 2 {
+		t.Fatalf("unexpected options: %+v", options)
+	}
+}
+
+func TestCompareRemoteOption(t *testing.T) {
+	options, _, err := parseOptions([]string{"--compare-remote", "--skip-pull"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.CompareRemote || !options.SkipPull {
 		t.Fatalf("unexpected options: %+v", options)
 	}
 }

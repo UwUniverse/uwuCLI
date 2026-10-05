@@ -350,6 +350,7 @@ uwu release - 检查版本 manifest 并迁移本地开发修改
   --no-prompt               禁用交互操作
   --no-dirty                不检查工作区修改
   --force-full-check        包含非里程碑版本中的 LineageOS/PixelOS 仓库
+  --compare-remote          跳过 manifest SHA1 检查，比较本地 HEAD 与云端默认分支
   --language LANGUAGE       设置语言：en 或 zh
 EOF
     else
@@ -372,6 +373,7 @@ Options:
   --no-prompt               Disable interactive operations
   --no-dirty                Do not check worktree modifications
   --force-full-check        Include LineageOS/PixelOS in non-milestone versions
+  --compare-remote          Skip manifest SHA1 checks and compare local HEAD with remote default branches
   --language LANGUAGE       Set the language to en or zh
 EOF
     fi

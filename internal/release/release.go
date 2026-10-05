@@ -132,6 +132,13 @@ type CheckResult struct {
 	TargetCommits     []string
 }
 
+type RemoteCheckResult struct {
+	Project    Project
+	LocalSHA1  string
+	RemoteSHA1 string
+	Err        string
+}
+
 type SandboxEntry struct {
 	Result         CheckResult
 	Path           string
@@ -155,6 +162,7 @@ type Options struct {
 	SkipPull       bool
 	NoPrompt       bool
 	ForceFullCheck bool
+	CompareRemote  bool
 	Language       string
 }
 
@@ -522,6 +530,10 @@ func checkProjects(projects []Project, jobs int, checkDirty bool, out, errOut io
 }
 
 func printProgress(out, errOut io.Writer, index, total int, result CheckResult) {
+	if result.Status == "match" && !result.Dirty {
+		return
+	}
+
 	stream := out
 	icon := releaseStyle.paint(releaseStyle.green, "[OK]")
 	detail := "HEAD matches manifest"
@@ -583,6 +595,96 @@ func printReport(out io.Writer, language string, results []CheckResult) {
 	if len(relations) > 0 {
 		fmt.Fprintf(out, "  %-16s%s=%d %s=%d %s=%d %s=%d\n", tr("Relations", "关系"), "ahead", relations["ahead"], "behind", relations["behind"], "diverged", relations["diverged"], "unknown", relations["unknown"])
 	}
+}
+
+func checkRemoteHead(project Project) RemoteCheckResult {
+	result := RemoteCheckResult{Project: project}
+	head := git(project.Path, "rev-parse", "--verify", "HEAD^{commit}")
+	if head.code != 0 {
+		result.Err = strings.TrimSpace(head.stderr)
+		if result.Err == "" {
+			result.Err = "unable to resolve local HEAD"
+		}
+		return result
+	}
+	result.LocalSHA1 = strings.ToLower(strings.TrimSpace(head.stdout))
+	remote := project.Remote
+	if remote == "" {
+		remote = "origin"
+	}
+	remoteHead := git(project.Path, "ls-remote", "--symref", remote, "HEAD")
+	if remoteHead.code != 0 {
+		result.Err = strings.TrimSpace(remoteHead.stderr)
+		if result.Err == "" {
+			result.Err = "unable to read remote HEAD"
+		}
+		return result
+	}
+	for _, line := range strings.Split(remoteHead.stdout, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[1] == "HEAD" && sha1RE.MatchString(fields[0]) {
+			result.RemoteSHA1 = strings.ToLower(fields[0])
+			return result
+		}
+	}
+	result.Err = "remote did not advertise a SHA1 for HEAD"
+	return result
+}
+
+func compareRemoteHeads(projects []Project, jobs int, language string, out, errOut io.Writer) []RemoteCheckResult {
+	if jobs < 1 {
+		jobs = 1
+	}
+	results := make([]RemoteCheckResult, len(projects))
+	work := make(chan int)
+	var wait sync.WaitGroup
+	for worker := 0; worker < jobs; worker++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for index := range work {
+				results[index] = checkRemoteHead(projects[index])
+			}
+		}()
+	}
+	for index := range projects {
+		work <- index
+	}
+	close(work)
+	wait.Wait()
+	sort.Slice(results, func(i, j int) bool { return results[i].Project.RelativePath < results[j].Project.RelativePath })
+
+	tr := translator(language)
+	fmt.Fprintf(out, "\n%s\n", releaseStyle.boldText(tr("Current remote HEAD SHA1 comparison", "当前云端 HEAD SHA1 对比")))
+	matched, mismatched, failed := 0, 0, 0
+	for _, result := range results {
+		if result.Err != "" {
+			failed++
+			fmt.Fprintf(errOut, "%s %s: %s\n",
+				releaseStyle.paint(releaseStyle.red+releaseStyle.bold, "[REMOTE ERROR]"),
+				releaseStyle.boldText(result.Project.RelativePath),
+				releaseStyle.paint(releaseStyle.red, result.Err))
+			continue
+		}
+		if result.LocalSHA1 == result.RemoteSHA1 {
+			matched++
+			continue
+		}
+		mismatched++
+		fmt.Fprintf(out, "%s %s\n  %s %s\n  %s %s\n",
+			releaseStyle.paint(releaseStyle.red+releaseStyle.bold, "[MISMATCH]"),
+			releaseStyle.boldText(result.Project.RelativePath),
+			releaseStyle.dimText(tr("local:", "本地：")),
+			releaseStyle.paint(releaseStyle.red, result.LocalSHA1),
+			releaseStyle.dimText(tr("remote:", "云端：")),
+			releaseStyle.paint(releaseStyle.cyan, result.RemoteSHA1))
+	}
+	fmt.Fprintf(out, "%s %s=%s %s=%s %s=%s\n",
+		tr("Remote HEAD", "云端 HEAD"),
+		tr("match", "匹配"), releaseStyle.paint(releaseStyle.green, strconv.Itoa(matched)),
+		tr("mismatch", "不匹配"), releaseStyle.paint(releaseStyle.red, strconv.Itoa(mismatched)),
+		tr("error", "错误"), releaseStyle.paint(releaseStyle.red, strconv.Itoa(failed)))
+	return results
 }
 
 type releaseTranslator func(string, string) string
@@ -1125,6 +1227,7 @@ func parseOptions(args []string) (Options, bool, error) {
 	flags.BoolVar(&options.SkipPull, "skip-pull", false, "skip manifest repository update")
 	flags.BoolVar(&options.NoPrompt, "no-prompt", false, "disable interactive prompts")
 	flags.BoolVar(&options.ForceFullCheck, "force-full-check", false, "include all projects")
+	flags.BoolVar(&options.CompareRemote, "compare-remote", false, "compare local HEAD with each remote default branch")
 	flags.StringVar(&options.Language, "language", os.Getenv("UWU_LANG"), "language: en or zh")
 	if err := flags.Parse(reorderPositionals(args)); err != nil {
 		return options, false, err
@@ -1329,6 +1432,7 @@ func Run(args []string) int {
 		fmt.Println("  --skip-pull               Do not update the manifest repository")
 		fmt.Println("  --no-prompt               Disable interactive operations")
 		fmt.Println("  --force-full-check        Include LineageOS/PixelOS in non-milestones")
+		fmt.Println("  --compare-remote          Compare local HEAD with current remote HEAD SHA1s")
 		fmt.Println("  --language en|zh          Select output language")
 		return 0
 	}
@@ -1377,6 +1481,17 @@ func Run(args []string) int {
 	}
 	relativeManifest, _ := filepath.Rel(top, manifest)
 	fmt.Fprintf(os.Stdout, "[info] Manifest: %s\n", filepath.ToSlash(relativeManifest))
+	if options.CompareRemote {
+		fmt.Fprintf(os.Stdout, "[info] %s\n", tr("Using the manifest only to discover repositories and remote names.", "仅使用 manifest 获取仓库列表和 remote 名称。"))
+		fmt.Fprintf(os.Stdout, "[info] "+tr("Querying current remote HEAD for %d repositories...\n", "正在查询 %d 个仓库的当前云端 HEAD...\n"), len(projects))
+		remoteResults := compareRemoteHeads(projects, options.Jobs, language, os.Stdout, os.Stderr)
+		for _, result := range remoteResults {
+			if result.Err != "" || result.LocalSHA1 != result.RemoteSHA1 {
+				return 1
+			}
+		}
+		return 0
+	}
 	fmt.Fprintf(os.Stdout, "[info] Checking %d SHA1-pinned repository(ies) with %d worker(s)...\n", len(projects), options.Jobs)
 	results := checkProjects(projects, options.Jobs, !options.NoDirty, os.Stdout, os.Stderr)
 	printReport(os.Stdout, language, results)
