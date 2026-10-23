@@ -421,7 +421,7 @@ func TestSignTargetFilesUsesIsolatedOutput(t *testing.T) {
 		signTargetFiles: filepath.Join(directory, "sign_target_files_apks"),
 		otaFromTarget:   filepath.Join(directory, "ota_from_target_files"),
 	}
-	writeExecutable(t, tools.signTargetFiles, "cp \"$4\" \"$5\"")
+	writeExecutable(t, tools.signTargetFiles, "previous=; last=; for argument in \"$@\"; do previous=$last; last=$argument; done; cp \"$previous\" \"$last\"")
 	writeExecutable(t, tools.otaFromTarget, "cp \"$3\" \"$4\"")
 	output := filepath.Join(directory, "release", "product", "checks", "run")
 	result, err := signTargetFiles(context.Background(), targetFiles, keys, "", output, "product", true, true, tools)

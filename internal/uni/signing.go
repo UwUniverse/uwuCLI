@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -339,7 +341,7 @@ func signTargetFiles(ctx context.Context, targetFiles, keysDir, configPath, outp
 		return signingResult{}, err
 	}
 	signedTargetFiles, signedOTA := signingArtifactNames(outputDir, product)
-	args := []string{"-o", "-d", keysDir}
+	args := []string{"-o", "-d", keysDir, "--threads", strconv.Itoa(runtime.NumCPU())}
 	args = appendSortedSigningMappings(args, "-k", config.KeyMappings)
 	args = appendSortedSigningMappings(args, "--extra_apks", autoAPKs)
 	args = appendSortedSigningMappings(args, "--extra_apex_payload_key", autoPayloads)
