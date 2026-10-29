@@ -231,8 +231,8 @@ func durationWeights(ninjaLogPath string, metadata taskMetadata) (map[string]flo
 		if !found {
 			continue
 		}
-		fields := strings.SplitN(logData.lines[output], "\t", 5)
-		if len(fields) != 5 {
+		fields, valid := ninjaLogFields(logData.lines[output])
+		if !valid {
 			continue
 		}
 		started, startErr := strconv.ParseInt(fields[0], 10, 64)

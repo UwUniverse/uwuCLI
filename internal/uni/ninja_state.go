@@ -30,6 +30,19 @@ type ninjaLogData struct {
 	order  []string
 }
 
+// Keep the fifth field intact, matching the recovery parser's existing behavior.
+func ninjaLogFields(line string) (fields [5]string, ok bool) {
+	for index := 0; index < len(fields)-1; index++ {
+		var found bool
+		fields[index], line, found = strings.Cut(line, "\t")
+		if !found {
+			return fields, false
+		}
+	}
+	fields[len(fields)-1] = line
+	return fields, true
+}
+
 func readNinjaLog(path string) (ninjaLogData, error) {
 	data := ninjaLogData{lines: make(map[string]string)}
 	file, err := os.Open(path)
@@ -55,8 +68,8 @@ func readNinjaLog(path string) (ninjaLogData, error) {
 	data.header = scanner.Text()
 	for scanner.Scan() {
 		line := scanner.Text()
-		fields := strings.SplitN(line, "\t", 5)
-		if len(fields) != 5 || fields[3] == "" {
+		fields, valid := ninjaLogFields(line)
+		if !valid || fields[3] == "" {
 			continue
 		}
 		output := fields[3]
@@ -104,8 +117,8 @@ func filterNinjaLogByOutputs(data ninjaLogData, outDir string) ninjaLogData {
 	}
 	for _, output := range data.order {
 		line := data.lines[output]
-		fields := strings.SplitN(line, "\t", 5)
-		if len(fields) != 5 {
+		fields, valid := ninjaLogFields(line)
+		if !valid {
 			continue
 		}
 		loggedMtime, err := strconv.ParseInt(fields[2], 10, 64)
@@ -187,8 +200,8 @@ func filterNinjaLogByInterruptedOutputs(data ninjaLogData, outDir string) ninjaL
 	}
 	for _, output := range data.order {
 		line := data.lines[output]
-		fields := strings.SplitN(line, "\t", 5)
-		if len(fields) != 5 {
+		fields, valid := ninjaLogFields(line)
+		if !valid {
 			continue
 		}
 		loggedMtime, err := strconv.ParseInt(fields[2], 10, 64)
@@ -221,8 +234,8 @@ func filterNinjaLogByAPIOutputs(data ninjaLogData, outDir string, apiMismatch bo
 		if apiMismatch {
 			continue
 		}
-		fields := strings.SplitN(line, "\t", 5)
-		if len(fields) != 5 {
+		fields, valid := ninjaLogFields(line)
+		if !valid {
 			continue
 		}
 		loggedMtime, err := strconv.ParseInt(fields[2], 10, 64)

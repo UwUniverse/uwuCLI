@@ -107,25 +107,33 @@ func ReadMemorySnapshot() (MemorySnapshot, error) {
 		return MemorySnapshot{}, err
 	}
 	var snapshot MemorySnapshot
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
+	for line := range strings.SplitSeq(string(data), "\n") {
+		var name, raw string
+		for field := range strings.FieldsSeq(line) {
+			if name == "" {
+				name = field
+			} else {
+				raw = field
+				break
+			}
 		}
-		value, err := strconv.ParseInt(fields[1], 10, 64)
-		if err != nil {
-			continue
-		}
-		value *= 1024
-		switch fields[0] {
-		case "MemTotal:":
-			snapshot.Total = value
-		case "MemAvailable:":
-			snapshot.Available = value
-		case "SwapTotal:":
-			snapshot.SwapTotal = value
-		case "SwapFree:":
-			snapshot.SwapFree = value
+		switch name {
+		case "MemTotal:", "MemAvailable:", "SwapTotal:", "SwapFree:":
+			value, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				continue
+			}
+			value *= 1024
+			switch name {
+			case "MemTotal:":
+				snapshot.Total = value
+			case "MemAvailable:":
+				snapshot.Available = value
+			case "SwapTotal:":
+				snapshot.SwapTotal = value
+			case "SwapFree:":
+				snapshot.SwapFree = value
+			}
 		}
 	}
 	file, err := os.Open("/proc/vmstat")
@@ -135,8 +143,16 @@ func ReadMemorySnapshot() (MemorySnapshot, error) {
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) != 2 {
+		var fields [3]string
+		count := 0
+		for field := range strings.FieldsSeq(scanner.Text()) {
+			fields[count] = field
+			count++
+			if count == len(fields) {
+				break
+			}
+		}
+		if count != 2 {
 			continue
 		}
 		switch fields[0] {

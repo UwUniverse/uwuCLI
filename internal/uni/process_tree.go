@@ -25,19 +25,30 @@ func readProcessIdentity(pid int) (processIdentity, error) {
 	if err != nil {
 		return processIdentity{}, err
 	}
-	closing := strings.LastIndex(string(data), ") ")
+	closing := bytes.LastIndex(data, []byte(") "))
 	if closing < 0 {
 		return processIdentity{}, syscall.EINVAL
 	}
-	fields := strings.Fields(string(data)[closing+2:])
-	if len(fields) <= 19 {
+	var parent, start []byte
+	index := 0
+	for field := range bytes.FieldsSeq(data[closing+2:]) {
+		if index == 1 {
+			parent = field
+		}
+		if index == 19 {
+			start = field
+			break
+		}
+		index++
+	}
+	if start == nil {
 		return processIdentity{}, syscall.EINVAL
 	}
-	parentPID, err := strconv.Atoi(fields[1])
+	parentPID, err := strconv.Atoi(string(parent))
 	if err != nil {
 		return processIdentity{}, err
 	}
-	startTime, err := strconv.ParseUint(fields[19], 10, 64)
+	startTime, err := strconv.ParseUint(string(start), 10, 64)
 	if err != nil {
 		return processIdentity{}, err
 	}
@@ -93,7 +104,7 @@ func runningUniProcesses(outDir string) []processIdentity {
 }
 
 func isKotlinDaemonCommandLine(commandLine []byte) bool {
-	for _, argument := range bytes.Split(commandLine, []byte{0}) {
+	for argument := range bytes.SplitSeq(commandLine, []byte{0}) {
 		if string(argument) == "org.jetbrains.kotlin.daemon.KotlinCompileDaemon" {
 			return true
 		}
@@ -124,7 +135,7 @@ func runningUniProcessesForBuild(outDir string, includeKotlinDaemon bool) []proc
 		if err != nil {
 			continue
 		}
-		for _, variable := range bytes.Split(environment, []byte{0}) {
+		for variable := range bytes.SplitSeq(environment, []byte{0}) {
 			const prefix = "UNI_STATE_FILE="
 			if !bytes.HasPrefix(variable, []byte(prefix)) {
 				continue

@@ -425,7 +425,7 @@ func parseNinjaMetadataLine(line []byte, result *ninjaMetadata) {
 	}
 	var module []byte
 	r8 := false
-	for _, field := range bytes.Split(fields, []byte(";")) {
+	for field := range bytes.SplitSeq(fields, []byte(";")) {
 		key, value, found := bytes.Cut(field, []byte("="))
 		if !found {
 			continue

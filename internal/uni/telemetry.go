@@ -199,13 +199,16 @@ func readPSI(path string) (memoryPSI, error) {
 		return memoryPSI{}, err
 	}
 	var result memoryPSI
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
+	for line := range strings.SplitSeq(string(data), "\n") {
 		var sample pressureSample
-		for _, field := range fields[1:] {
+		var kind string
+		count := 0
+		for field := range strings.FieldsSeq(line) {
+			count++
+			if count == 1 {
+				kind = field
+				continue
+			}
 			name, value, found := strings.Cut(field, "=")
 			if !found {
 				continue
@@ -221,7 +224,10 @@ func readPSI(path string) (memoryPSI, error) {
 				sample.total, _ = strconv.ParseUint(value, 10, 64)
 			}
 		}
-		switch fields[0] {
+		if count < 2 {
+			continue
+		}
+		switch kind {
 		case "some":
 			result.some = sample
 		case "full":
@@ -237,28 +243,39 @@ func readCPUCounters() (cpuCounters, error) {
 		return cpuCounters{}, err
 	}
 	line, _, _ := strings.Cut(string(data), "\n")
-	fields := strings.Fields(line)
-	if len(fields) < 5 || fields[0] != "cpu" {
+	var total, idle, iowait uint64
+	var parseErr error
+	count := 0
+	for field := range strings.FieldsSeq(line) {
+		if count == 0 {
+			if field != "cpu" {
+				return cpuCounters{}, fmt.Errorf("invalid /proc/stat cpu line")
+			}
+		} else {
+			value, err := strconv.ParseUint(field, 10, 64)
+			if err != nil && parseErr == nil {
+				parseErr = err
+			}
+			// guest and guest_nice are already included in user and nice.
+			if count <= 8 {
+				total += value
+			}
+			if count == 4 {
+				idle = value
+			}
+			if count == 5 {
+				iowait = value
+			}
+		}
+		count++
+	}
+	if count < 5 {
 		return cpuCounters{}, fmt.Errorf("invalid /proc/stat cpu line")
 	}
-	values := make([]uint64, len(fields)-1)
-	for index, field := range fields[1:] {
-		value, err := strconv.ParseUint(field, 10, 64)
-		if err != nil {
-			return cpuCounters{}, err
-		}
-		values[index] = value
+	if parseErr != nil {
+		return cpuCounters{}, parseErr
 	}
-	var total uint64
-	// guest and guest_nice are already included in user and nice.
-	for _, value := range values[:min(len(values), 8)] {
-		total += value
-	}
-	iowait := uint64(0)
-	if len(values) > 4 {
-		iowait = values[4]
-	}
-	return cpuCounters{total: total, idle: values[3], iowait: iowait}, nil
+	return cpuCounters{total: total, idle: idle, iowait: iowait}, nil
 }
 
 func readDiskAvailable(path string) (int64, error) {
@@ -296,44 +313,67 @@ func readCPUFrequencySnapshot() (int64, int64, int64) {
 }
 
 func classifyBuildProcess(command []byte, fallback string) (string, string) {
-	arguments := bytes.Split(bytes.TrimRight(command, "\x00"), []byte{0})
+	command = bytes.TrimRight(command, "\x00")
+	first, _, _ := bytes.Cut(command, []byte{0})
 	name := fallback
-	if len(arguments) > 0 && len(arguments[0]) > 0 {
-		name = filepath.Base(string(arguments[0]))
+	if len(first) > 0 {
+		name = filepath.Base(string(first))
 	}
-	joined := strings.ToLower(strings.Join(func() []string {
-		values := make([]string, 0, len(arguments))
-		for _, argument := range arguments {
-			values = append(values, string(argument))
-		}
-		return values
-	}(), " "))
 	lowerName := strings.ToLower(name)
-	isJava := lowerName == "java"
+	if lowerName != "java" {
+		switch {
+		case strings.Contains(lowerName, "kotlinc"):
+			return name, "kotlinc"
+		case lowerName == "javac":
+			return name, "javac"
+		case lowerName == "rustc":
+			return name, "rustc"
+		case lowerName == "clang" || lowerName == "clang++":
+			return name, "clang"
+		case lowerName == "ld" || lowerName == "ld.lld" || lowerName == "lld":
+			return name, "linker"
+		default:
+			return name, "other"
+		}
+	}
+	// Normalize into a call-local buffer, preserving the original joined-argument matching rules.
+	var scratch [256]byte
+	joined := scratch[:0]
+	if len(command) > cap(joined) {
+		joined = make([]byte, 0, len(command))
+	}
+	nonASCII := false
+	for _, ch := range command {
+		if ch == 0 {
+			ch = ' '
+		} else if ch >= 'A' && ch <= 'Z' {
+			ch += 'a' - 'A'
+		}
+		nonASCII = nonASCII || ch >= 0x80
+		joined = append(joined, ch)
+	}
+	if nonASCII {
+		joined = bytes.ToLower(joined)
+	}
 	hasR8Jar := false
-	if isJava {
-		for _, argument := range arguments[1:] {
-			switch strings.ToLower(filepath.Base(string(argument))) {
-			case "r8.jar", "d8.jar":
-				hasR8Jar = true
-			}
+	skipFirst := true
+	for argument := range bytes.SplitSeq(command, []byte{0}) {
+		if skipFirst {
+			skipFirst = false
+			continue
+		}
+		switch strings.ToLower(filepath.Base(string(argument))) {
+		case "r8.jar", "d8.jar":
+			hasR8Jar = true
 		}
 	}
 	switch {
-	case isJava && (strings.Contains(joined, "com.android.tools.r8.r8") ||
-		strings.Contains(joined, "com.android.tools.r8.d8") ||
-		hasR8Jar):
+	case bytes.Contains(joined, []byte("com.android.tools.r8.r8")) || bytes.Contains(joined, []byte("com.android.tools.r8.d8")) || hasR8Jar:
 		return name, "r8"
-	case strings.Contains(lowerName, "kotlinc") || isJava && (strings.Contains(joined, "kotlinc") || strings.Contains(joined, "kotlin-compiler")):
+	case bytes.Contains(joined, []byte("kotlinc")) || bytes.Contains(joined, []byte("kotlin-compiler")):
 		return name, "kotlinc"
-	case lowerName == "javac" || isJava && (strings.Contains(joined, " javac ") || strings.Contains(joined, "javac.jar")):
+	case bytes.Contains(joined, []byte(" javac ")) || bytes.Contains(joined, []byte("javac.jar")):
 		return name, "javac"
-	case lowerName == "rustc":
-		return name, "rustc"
-	case lowerName == "clang" || lowerName == "clang++":
-		return name, "clang"
-	case lowerName == "ld" || lowerName == "ld.lld" || lowerName == "lld":
-		return name, "linker"
 	default:
 		return name, "other"
 	}
@@ -348,11 +388,19 @@ func readProcessTelemetry(identity processIdentity) (processTelemetry, error) {
 	if err != nil {
 		return processTelemetry{}, err
 	}
-	fields := strings.Fields(string(statm))
-	if len(fields) < 2 {
+	var resident string
+	count := 0
+	for field := range strings.FieldsSeq(string(statm)) {
+		count++
+		if count == 2 {
+			resident = field
+			break
+		}
+	}
+	if count < 2 {
 		return processTelemetry{}, fmt.Errorf("invalid statm for pid %d", identity.PID)
 	}
-	residentPages, err := strconv.ParseInt(fields[1], 10, 64)
+	residentPages, err := strconv.ParseInt(resident, 10, 64)
 	if err != nil {
 		return processTelemetry{}, err
 	}
