@@ -13,7 +13,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -35,6 +36,9 @@ type sourceGraphCache struct {
 	OutDir     string                           `json:"out_dir"`
 	Dirs       map[string]sourceGraphCacheEntry `json:"directories"`
 	Files      map[string]sourceGraphCacheEntry `json:"files"`
+
+	// The directory index is local to this scan and is never serialized.
+	children *sourceGraphIndex
 }
 
 type sourceGraphScanStats struct {
@@ -186,7 +190,7 @@ func validSourceGraphCachePath(relative, outRelative string) bool {
 	if outRelative != "" && (clean == outRelative || strings.HasPrefix(clean, outRelative+"/")) {
 		return false
 	}
-	for _, component := range strings.Split(clean, "/") {
+	for component := range strings.SplitSeq(clean, "/") {
 		if component == ".repo" || component == ".git" || component == ".codegraph" {
 			return false
 		}
@@ -253,16 +257,61 @@ func sourceGraphCachesEqual(left, right sourceGraphCache) bool {
 	return true
 }
 
-func sourceGraphChildren(cache sourceGraphCache) map[string][]sourceGraphChild {
-	children := make(map[string][]sourceGraphChild)
-	appendChild := func(relative string, directory bool) {
-		parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(relative)))
-		if parent == "" {
-			parent = "."
+type sourceGraphSpan struct {
+	start int
+	count int
+}
+
+type sourceGraphIndex struct {
+	spans   map[string]sourceGraphSpan
+	entries []sourceGraphChild
+}
+
+func (index *sourceGraphIndex) children(relative string) []sourceGraphChild {
+	span := index.spans[relative]
+	return index.entries[span.start : span.start+span.count]
+}
+
+// Cached paths are already validated and slash-separated.
+func sourceGraphPathParts(relative string) (parent, name string) {
+	if index := strings.LastIndexByte(relative, '/'); index >= 0 {
+		return relative[:index], relative[index+1:]
+	}
+	return ".", relative
+}
+
+func sourceGraphChildren(cache sourceGraphCache) *sourceGraphIndex {
+	if cache.children != nil {
+		return cache.children
+	}
+	index := &sourceGraphIndex{spans: make(map[string]sourceGraphSpan, len(cache.Dirs))}
+	countChild := func(relative string) {
+		parent, _ := sourceGraphPathParts(relative)
+		span := index.spans[parent]
+		span.count++
+		index.spans[parent] = span
+	}
+	for relative := range cache.Dirs {
+		if relative != "." {
+			countChild(relative)
 		}
-		children[parent] = append(children[parent], sourceGraphChild{
-			name: filepath.Base(filepath.FromSlash(relative)), relative: relative, directory: directory,
-		})
+	}
+	for relative := range cache.Files {
+		countChild(relative)
+	}
+	total := 0
+	for parent, span := range index.spans {
+		span.start = total
+		total += span.count
+		index.spans[parent] = span
+	}
+	index.entries = make([]sourceGraphChild, total)
+	appendChild := func(relative string, directory bool) {
+		parent, name := sourceGraphPathParts(relative)
+		span := index.spans[parent]
+		index.entries[span.start] = sourceGraphChild{name: name, relative: relative, directory: directory}
+		span.start++
+		index.spans[parent] = span
 	}
 	for relative := range cache.Dirs {
 		if relative != "." {
@@ -272,7 +321,11 @@ func sourceGraphChildren(cache sourceGraphCache) map[string][]sourceGraphChild {
 	for relative := range cache.Files {
 		appendChild(relative, false)
 	}
-	return children
+	for parent, span := range index.spans {
+		span.start -= span.count
+		index.spans[parent] = span
+	}
+	return index
 }
 
 func sourceGraphRelative(parent, name string) string {
@@ -323,7 +376,7 @@ func refreshSourceGraphCache(sourceRoot, outDir string, old sourceGraphCache, st
 		unchanged := cached && previous == metadata
 		next.Dirs[relative] = metadata
 		if unchanged {
-			for _, child := range children[relative] {
+			for _, child := range children.children(relative) {
 				if child.directory {
 					if err := scanDirectory(child.relative); err != nil {
 						return err
@@ -382,6 +435,10 @@ func refreshSourceGraphCache(sourceRoot, outDir string, old sourceGraphCache, st
 	if err := scanDirectory("."); err != nil {
 		return sourceGraphCache{}, stats, err
 	}
+	// Reuse adjacency only when no directory or file disappeared or was reread.
+	if stats.ChangedDirs == 0 {
+		next.children = children
+	}
 	return next, stats, nil
 }
 
@@ -438,7 +495,10 @@ func scanSourceGraphFromScratch(sourceRoot, outDir string, started time.Time, pr
 
 func fingerprintSourceGraphCache(cache sourceGraphCache) (string, int64, error) {
 	hash := sha256.New()
-	fmt.Fprintf(hash, "version\x00%d\n", sourceFingerprintVersion)
+	var scratch [256]byte
+	record := strconv.AppendInt(append(scratch[:0], "version\x00"...), int64(sourceFingerprintVersion), 10)
+	record = append(record, '\n')
+	_, _ = hash.Write(record)
 	children := sourceGraphChildren(cache)
 	var newest int64
 	var writeDirectory func(string) error
@@ -447,9 +507,13 @@ func fingerprintSourceGraphCache(cache sourceGraphCache) (string, int64, error) 
 		if !exists {
 			return fmt.Errorf("source input cache is missing directory %q", relative)
 		}
-		fmt.Fprintf(hash, "dir\x00%s\x00%d\n", relative, metadata.ModTimeNano)
-		entries := children[relative]
-		sort.Slice(entries, func(left, right int) bool { return entries[left].name < entries[right].name })
+		record = append(record[:0], "dir\x00"...)
+		record = append(record, relative...)
+		record = strconv.AppendInt(append(record, 0), metadata.ModTimeNano, 10)
+		record = append(record, '\n')
+		_, _ = hash.Write(record)
+		entries := children.children(relative)
+		slices.SortFunc(entries, func(left, right sourceGraphChild) int { return strings.Compare(left.name, right.name) })
 		for _, child := range entries {
 			if child.directory {
 				if err := writeDirectory(child.relative); err != nil {
@@ -461,7 +525,11 @@ func fingerprintSourceGraphCache(cache sourceGraphCache) (string, int64, error) 
 			if !exists {
 				return fmt.Errorf("source input cache is missing file %q", child.relative)
 			}
-			fmt.Fprintf(hash, "%s\x00%d\x00%d\n", child.relative, fileMetadata.Size, fileMetadata.ModTimeNano)
+			record = append(record[:0], child.relative...)
+			record = strconv.AppendInt(append(record, 0), fileMetadata.Size, 10)
+			record = strconv.AppendInt(append(record, 0), fileMetadata.ModTimeNano, 10)
+			record = append(record, '\n')
+			_, _ = hash.Write(record)
 			if fileMetadata.ModTimeNano > newest {
 				newest = fileMetadata.ModTimeNano
 			}
