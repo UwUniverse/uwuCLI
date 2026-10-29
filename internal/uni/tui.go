@@ -362,8 +362,14 @@ func compactActivity(sample TelemetrySample) string {
 }
 
 func (tui *compactTUI) consume(line string) {
-	displayLine := compactDisplayLine(line)
-	line = sanitizeCompactLine(line)
+	var displayLine string
+	if compactLineUnchanged(line) {
+		line = strings.TrimSpace(line)
+		displayLine = line
+	} else {
+		displayLine = rewriteCompactDisplayLine(line)
+		line = rewriteCompactPlainLine(line)
+	}
 	if line == "" {
 		return
 	}
@@ -409,11 +415,11 @@ func (tui *compactTUI) consume(line string) {
 		}
 	}
 	target.logs.add(line)
-	if percent, done, total, ok := parseCompactProgress(line); ok {
+	if percent, done, total, ok, eta := parseCompactStatus(line); ok {
 		target.percent = percent
 		target.done = done
 		target.total = total
-		target.eta = parseCompactETA(line)
+		target.eta = eta
 		if target.eta != "" {
 			if duration, err := time.ParseDuration(target.eta); err == nil {
 				target.etaAt = time.Now().Add(duration)
@@ -505,6 +511,13 @@ func (tui *compactTUI) consumeStatusEvent(event compactStatusEvent, connectionID
 }
 
 func compactDisplayLine(line string) string {
+	if compactLineUnchanged(line) {
+		return strings.TrimSpace(line)
+	}
+	return rewriteCompactDisplayLine(line)
+}
+
+func rewriteCompactDisplayLine(line string) string {
 	line = strings.ToValidUTF8(line, "")
 	var output strings.Builder
 	output.Grow(len(line))
@@ -537,57 +550,82 @@ func compactDisplayLine(line string) string {
 	return strings.TrimSpace(output.String())
 }
 
-func parseCompactProgress(line string) (percent, done, total int, ok bool) {
-	for offset := 0; offset < len(line); {
-		open := strings.IndexByte(line[offset:], '[')
-		if open < 0 {
-			return 0, 0, 0, false
+// Ordinary output already has the representation needed by both the display and log ring.
+func compactLineUnchanged(line string) bool {
+	nonASCII := false
+	for index := 0; index < len(line); index++ {
+		if line[index] < 0x20 {
+			return false
 		}
-		open += offset
-		close := strings.IndexByte(line[open+1:], ']')
-		if close < 0 {
-			return 0, 0, 0, false
-		}
-		close += open + 1
-		fields := strings.Fields(line[open+1 : close])
-		if len(fields) >= 2 && strings.HasSuffix(fields[0], "%") {
-			parsedPercent, percentErr := strconv.Atoi(strings.TrimSuffix(fields[0], "%"))
-			left, right, found := strings.Cut(fields[1], "/")
-			parsedDone, doneErr := strconv.Atoi(left)
-			parsedTotal, totalErr := strconv.Atoi(right)
-			if found && percentErr == nil && doneErr == nil && totalErr == nil && parsedTotal > 0 {
-				return parsedPercent, parsedDone, parsedTotal, true
-			}
-		}
-		offset = close + 1
+		nonASCII = nonASCII || line[index] >= utf8.RuneSelf
 	}
-	return 0, 0, 0, false
+	return !nonASCII || utf8.ValidString(line)
+}
+
+func parseCompactProgress(line string) (percent, done, total int, ok bool) {
+	percent, done, total, ok, _ = parseCompactStatus(line)
+	return
 }
 
 func parseCompactETA(line string) string {
+	_, _, _, _, eta := parseCompactStatus(line)
+	return eta
+}
+
+// Progress and ETA have independent first-match rules, but can share one scan.
+func parseCompactStatus(line string) (percent, done, total int, ok bool, eta string) {
 	for offset := 0; offset < len(line); {
 		open := strings.IndexByte(line[offset:], '[')
 		if open < 0 {
-			return ""
+			break
 		}
 		open += offset
 		close := strings.IndexByte(line[open+1:], ']')
 		if close < 0 {
-			return ""
+			break
 		}
 		close += open + 1
-		fields := strings.Fields(line[open+1 : close])
-		if len(fields) >= 3 && strings.HasSuffix(fields[0], "%") && strings.Contains(fields[1], "/") {
-			if _, err := time.ParseDuration(fields[2]); err == nil {
-				return fields[2]
+		var fields [3]string
+		count := 0
+		for field := range strings.FieldsSeq(line[open+1 : close]) {
+			fields[count] = field
+			count++
+			if count == len(fields) {
+				break
 			}
+		}
+		if count >= 2 && strings.HasSuffix(fields[0], "%") {
+			if !ok {
+				parsedPercent, percentErr := strconv.Atoi(strings.TrimSuffix(fields[0], "%"))
+				left, right, found := strings.Cut(fields[1], "/")
+				parsedDone, doneErr := strconv.Atoi(left)
+				parsedTotal, totalErr := strconv.Atoi(right)
+				if found && percentErr == nil && doneErr == nil && totalErr == nil && parsedTotal > 0 {
+					percent, done, total, ok = parsedPercent, parsedDone, parsedTotal, true
+				}
+			}
+			if eta == "" && count >= 3 && strings.Contains(fields[1], "/") {
+				if _, err := time.ParseDuration(fields[2]); err == nil {
+					eta = fields[2]
+				}
+			}
+		}
+		if ok && eta != "" {
+			break
 		}
 		offset = close + 1
 	}
-	return ""
+	return
 }
 
 func sanitizeCompactLine(line string) string {
+	if compactLineUnchanged(line) {
+		return strings.TrimSpace(line)
+	}
+	return rewriteCompactPlainLine(line)
+}
+
+func rewriteCompactPlainLine(line string) string {
 	line = strings.ToValidUTF8(line, "")
 	var output strings.Builder
 	output.Grow(len(line))
