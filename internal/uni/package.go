@@ -51,23 +51,82 @@ func readProperties(path string) (map[string]string, error) {
 	return properties, nil
 }
 
-func releaseMetadata(productOut string) (releasePackageMetadata, error) {
-	path := filepath.Join(productOut, "product", "etc", "build.prop")
-	properties, err := readProperties(path)
+// Read the properties produced by this device, including legacy partition layouts.
+func releaseProperties(productOut string) (map[string]string, error) {
+	entries, err := os.ReadDir(productOut)
 	if err != nil {
-		return releasePackageMetadata{}, fmt.Errorf("read release metadata from %s: %w", path, err)
+		return nil, fmt.Errorf("list release partitions in %s: %w", productOut, err)
+	}
+	directories := []string{productOut}
+	for _, entry := range entries {
+		path := filepath.Join(productOut, entry.Name())
+		isDirectory := entry.IsDir()
+		if entry.Type()&os.ModeSymlink != 0 {
+			info, err := os.Stat(path)
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("inspect release partition %s: %w", path, err)
+			}
+			isDirectory = info.IsDir()
+		}
+		if isDirectory {
+			directories = append(directories, path)
+		}
+	}
+	properties := make(map[string]string)
+	dateUTC := ""
+	found := false
+	for _, directory := range directories {
+		// Match releasetools: prefer etc/build.prop over the legacy build.prop.
+		for _, relative := range []string{filepath.Join("etc", "build.prop"), "build.prop"} {
+			path := filepath.Join(directory, relative)
+			values, err := readProperties(path)
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("read release properties from %s: %w", path, err)
+			}
+			found = true
+			for key, value := range values {
+				previous := properties[key]
+				if previous != "" && value != "" && previous != value && strings.HasPrefix(key, "ro.uwu.") {
+					return nil, fmt.Errorf("conflicting release property %s in %s", key, path)
+				}
+				if previous == "" {
+					properties[key] = value
+				}
+			}
+			if dateUTC == "" && (values["ro.uwu.release"] != "" || values["ro.uwu.build.version"] != "") {
+				dateUTC = values["ro."+filepath.Base(directory)+".build.date.utc"]
+			}
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("no build.prop found under %s", productOut)
+	}
+	if properties["ro.build.date.utc"] == "" {
+		properties["ro.build.date.utc"] = dateUTC
+	}
+	return properties, nil
+}
+
+func releaseMetadata(productOut string) (releasePackageMetadata, error) {
+	properties, err := releaseProperties(productOut)
+	if err != nil {
+		return releasePackageMetadata{}, err
 	}
 	version := properties["ro.uwu.release"]
 	if version == "" {
 		version = properties["ro.uwu.build.version"]
 	}
-	dateUTC := properties["ro.product.build.date.utc"]
-	if dateUTC == "" {
-		dateUTC = properties["ro.build.date.utc"]
-	}
+	dateUTC := properties["ro.build.date.utc"]
 	timestamp, err := strconv.ParseInt(dateUTC, 10, 64)
 	if err != nil || timestamp <= 0 {
-		return releasePackageMetadata{}, fmt.Errorf("invalid build date %q in %s", dateUTC, path)
+		return releasePackageMetadata{}, fmt.Errorf("invalid build date %q under %s", dateUTC, productOut)
 	}
 	metadata := releasePackageMetadata{
 		version:     version,
