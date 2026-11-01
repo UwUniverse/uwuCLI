@@ -1523,7 +1523,7 @@ func (tui *compactTUI) summaryLines() []string {
 
 func shouldUseCompactTUI(options Options, stdinTTY, stdoutTTY bool, term string) bool {
 	return stdinTTY && stdoutTTY && term != "" && !strings.EqualFold(term, "dumb") &&
-		!options.ShowCommands && !options.Plan && !options.CleanLogs && options.InitSigningKeys == ""
+		!options.ShowCommands && !options.Plan && !options.CleanLogs
 }
 
 func outputLogPath(outDir string, now time.Time) string {

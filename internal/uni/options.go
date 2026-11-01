@@ -19,38 +19,32 @@ const (
 )
 
 type Options struct {
-	RawArgs         []string
-	BuildArgs       []string
-	KeyValues       []string
-	KeepGoing       int
-	MaxJobs         int
-	LoadAverage     float64
-	BatchSize       int
-	LoadSet         bool
-	Static          bool
-	Debug           bool
-	Dev             bool
-	DevAuto         bool
-	DevAutoSet      bool
-	Plan            bool
-	Help            bool
-	FullBuild       bool
-	Dist            bool
-	ShowCommands    bool
-	TrustOutput     bool
-	AssumeExisting  bool
-	ForceReuse      bool
-	CleanLogs       bool
-	Install         bool
-	InstallTarget   string
-	InitSigningKeys string
-	SignKeys        string
-	SignConfig      string
-	SignPath        string
-	SignCheck       bool
-	PackageMode     string
-	SkipOTASigning  bool
-	Targets         []string
+	RawArgs        []string
+	BuildArgs      []string
+	KeyValues      []string
+	KeepGoing      int
+	MaxJobs        int
+	LoadAverage    float64
+	BatchSize      int
+	LoadSet        bool
+	Static         bool
+	Debug          bool
+	Dev            bool
+	DevAuto        bool
+	DevAutoSet     bool
+	Plan           bool
+	Help           bool
+	FullBuild      bool
+	Dist           bool
+	ShowCommands   bool
+	TrustOutput    bool
+	AssumeExisting bool
+	ForceReuse     bool
+	CleanLogs      bool
+	Install        bool
+	InstallTarget  string
+	PackageMode    string
+	Targets        []string
 }
 
 const (
@@ -89,11 +83,6 @@ Options:
   --clean-logs         Remove build logs without touching build outputs
   -i, --install        Install the single APK target after a successful build
   -t, --target SERIAL  Select the Android device for --install
-  --init-signing-keys=DIR  Generate release keys once outside the source tree
-  --sign-keys=DIR      Build and sign an OTA with keys from DIR
-  --sign-path=DIR      Write signed packages to DIR
-  --sign-config=FILE   Read additional APK/APEX signing mappings
-  --sign-check         Sign existing target files into an isolated check directory
   --dev                Rebuild the R8 index for this run
   --dev-auto           Enable automatic R8 index refresh
   --no-dev-auto        Disable automatic R8 index refresh
@@ -131,11 +120,6 @@ const usageChinese = `用法: uni [选项] [目标...]
   --clean-logs         清理构建日志，不删除编译产物
   -i, --install        单个 APK 目标构建成功后安装
   -t, --target 序列号  指定 --install 使用的 Android 设备
-  --init-signing-keys=目录  在源码树外一次性生成发布密钥
-  --sign-keys=目录      使用目录中的密钥构建并签名 OTA
-  --sign-path=目录      指定签名产物目录
-  --sign-config=文件    读取额外 APK/APEX 签名映射
-  --sign-check         将已有 target-files 签名到隔离检查目录
   --dev                本次重新生成 R8 索引
   --dev-auto           开启 R8 索引自动刷新
   --no-dev-auto        关闭 R8 索引自动刷新
@@ -198,24 +182,19 @@ func customValue(args []string, index *int, name string) (string, bool, error) {
 
 func normalizeSingleDashOptions(args []string) []string {
 	aliases := map[string]string{
-		"-batch-size":        "--batch-size",
-		"-static":            "--static",
-		"-plan":              "--plan",
-		"-trust-output":      "--trust-output",
-		"-assume-existing":   "--assume-existing",
-		"-force-reuse":       "--force-reuse",
-		"-debug":             "--debug",
-		"-no-debug":          "--no-debug",
-		"-dev":               "--dev",
-		"-dev-auto":          "--dev-auto",
-		"-no-dev-auto":       "--no-dev-auto",
-		"-load-average":      "--load-average",
-		"-clean-logs":        "--clean-logs",
-		"-init-signing-keys": "--init-signing-keys",
-		"-sign-keys":         "--sign-keys",
-		"-sign-path":         "--sign-path",
-		"-sign-config":       "--sign-config",
-		"-sign-check":        "--sign-check",
+		"-batch-size":      "--batch-size",
+		"-static":          "--static",
+		"-plan":            "--plan",
+		"-trust-output":    "--trust-output",
+		"-assume-existing": "--assume-existing",
+		"-force-reuse":     "--force-reuse",
+		"-debug":           "--debug",
+		"-no-debug":        "--no-debug",
+		"-dev":             "--dev",
+		"-dev-auto":        "--dev-auto",
+		"-no-dev-auto":     "--no-dev-auto",
+		"-load-average":    "--load-average",
+		"-clean-logs":      "--clean-logs",
 	}
 	normalized := append([]string(nil), args...)
 	for index, arg := range normalized {
@@ -252,6 +231,12 @@ func ParseOptions(args []string) (Options, error) {
 	}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		name, _, _ := strings.Cut(arg, "=")
+		switch name {
+		case "--init-signing-keys", "--sign-keys", "--sign-path", "--sign-config", "--sign-check",
+			"-init-signing-keys", "-sign-keys", "-sign-path", "-sign-config", "-sign-check":
+			return Options{}, fmt.Errorf("%s is no longer supported; configure signing through vendor/uwu-priv", name)
+		}
 		legacyName := arg
 		if index := strings.IndexByte(legacyName, '='); index >= 0 {
 			legacyName = legacyName[:index]
@@ -300,9 +285,6 @@ func ParseOptions(args []string) (Options, error) {
 				return Options{}, fmt.Errorf("-t requires a device serial")
 			}
 			options.InstallTarget = value
-			continue
-		case "--sign-check":
-			options.SignCheck = true
 			continue
 		case "--dev":
 			options.Dev = true
@@ -371,43 +353,6 @@ func ParseOptions(args []string) (Options, error) {
 			}
 			options.LoadAverage = loadAverage
 			options.LoadSet = true
-			continue
-		}
-		if value, matched, err := customValue(args, &i, "--sign-keys"); matched {
-			if err != nil {
-				return Options{}, err
-			}
-			if strings.TrimSpace(value) == "" || strings.HasPrefix(value, "-") {
-				return Options{}, fmt.Errorf("--sign-keys requires a directory")
-			}
-			options.SignKeys = value
-			continue
-		}
-		if value, matched, err := customValue(args, &i, "--sign-path"); matched {
-			if err != nil {
-				return Options{}, err
-			}
-			if strings.TrimSpace(value) == "" || strings.HasPrefix(value, "-") {
-				return Options{}, fmt.Errorf("--sign-path requires a directory")
-			}
-			options.SignPath = value
-			continue
-		}
-		if value, matched, err := customValue(args, &i, "--init-signing-keys"); matched {
-			if err != nil {
-				return Options{}, err
-			}
-			if strings.TrimSpace(value) == "" || strings.HasPrefix(value, "-") {
-				return Options{}, fmt.Errorf("--init-signing-keys requires a directory")
-			}
-			options.InitSigningKeys = value
-			continue
-		}
-		if value, matched, err := customValue(args, &i, "--sign-config"); matched {
-			if err != nil {
-				return Options{}, err
-			}
-			options.SignConfig = value
 			continue
 		}
 		if strings.HasPrefix(arg, "-j") {
@@ -502,8 +447,7 @@ func ParseOptions(args []string) (Options, error) {
 		if len(options.Targets) != 1 {
 			return Options{}, fmt.Errorf("--install requires exactly one explicit build target")
 		}
-		if options.Plan || options.FullBuild || options.PackageMode != "" || options.SignCheck ||
-			options.SignKeys != "" || options.CleanLogs || options.InitSigningKeys != "" {
+		if options.Plan || options.FullBuild || options.PackageMode != "" || options.CleanLogs {
 			return Options{}, fmt.Errorf("--install can only be used with a single-phase module build")
 		}
 	} else if options.InstallTarget != "" {
@@ -518,44 +462,6 @@ func ParseOptions(args []string) (Options, error) {
 	}
 	if options.Dev && options.DevAutoSet && options.DevAuto {
 		return Options{}, fmt.Errorf("--dev and --dev-auto cannot be used together")
-	}
-	if options.InitSigningKeys != "" {
-		if len(options.BuildArgs) > 0 || options.SignKeys != "" || options.SignConfig != "" ||
-			options.SignPath != "" ||
-			options.SignCheck || options.CleanLogs || options.Plan || options.Static ||
-			options.Dev || options.DevAutoSet || options.ForceReuse || options.TrustOutput ||
-			options.AssumeExisting || options.Dist {
-			return Options{}, fmt.Errorf("--init-signing-keys must be used alone")
-		}
-		options.FullBuild = false
-		return options, nil
-	}
-	if options.SignConfig != "" && options.SignKeys == "" {
-		return Options{}, fmt.Errorf("--sign-config requires --sign-keys")
-	}
-	if options.SignPath != "" && options.SignKeys == "" {
-		return Options{}, fmt.Errorf("--sign-path requires --sign-keys")
-	}
-	if options.CleanLogs && options.SignKeys != "" {
-		return Options{}, fmt.Errorf("--clean-logs cannot be combined with --sign-keys")
-	}
-	if options.SignCheck && options.SignKeys == "" {
-		return Options{}, fmt.Errorf("--sign-check requires --sign-keys")
-	}
-	if options.SignKeys != "" && (options.TrustOutput || options.AssumeExisting) {
-		return Options{}, fmt.Errorf("--sign-keys cannot be combined with --trust-output or --assume-existing")
-	}
-	if options.SignCheck {
-		if len(options.Targets) > 0 || options.Dist {
-			return Options{}, fmt.Errorf("--sign-check uses existing target files and cannot be combined with build targets")
-		}
-		options.FullBuild = false
-	} else if options.SignKeys != "" {
-		var err error
-		options, err = signingBuildOptions(options)
-		if err != nil {
-			return Options{}, err
-		}
 	}
 	return options, nil
 }

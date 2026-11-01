@@ -4,6 +4,8 @@
 package uni
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -52,7 +54,7 @@ func TestPublishReleasePackages(t *testing.T) {
 			if err := os.WriteFile(source, []byte("package"), 0644); err != nil {
 				t.Fatal(err)
 			}
-			published, err := publishReleasePackage(state, test.mode, "", "")
+			published, err := publishReleasePackage(state, test.mode)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -103,33 +105,36 @@ func TestReleaseMetadataUsesConfiguredUwuBuildDate(t *testing.T) {
 	}
 }
 
-func TestPublishSignedPackageRenamesChecksum(t *testing.T) {
+func TestPublishBuiltReleasePackageWritesChecksum(t *testing.T) {
 	productOut := t.TempDir()
 	writeReleaseBuildProp(t, productOut)
-	output := t.TempDir()
-	source := filepath.Join(output, "uwu_fuxi-ota-signed.zip")
-	checksum := source + ".sha256"
-	if err := os.WriteFile(source, []byte("signed package"), 0644); err != nil {
+	buildProp := filepath.Join(productOut, "product", "etc", "build.prop")
+	properties, err := os.ReadFile(buildProp)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(checksum, []byte("deadbeef  uwu_fuxi-ota-signed.zip\n"), 0644); err != nil {
+	if err := os.WriteFile(buildProp, []byte(strings.ReplaceAll(string(properties), "test-keys", "release-keys")), 0644); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(productOut, "uwu_fuxi-ota.zip")
+	content := []byte("built package")
+	if err := os.WriteFile(source, content, 0644); err != nil {
 		t.Fatal(err)
 	}
 	published, err := publishReleasePackage(
-		State{ProductOut: productOut, TargetProduct: "uwu_fuxi"},
-		packageModeOTA, source, checksum)
+		State{ProductOut: productOut, TargetProduct: "uwu_fuxi"}, packageModeOTA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantName := "uwuAOSP-17.0.100-20260929-UNOFFICIAL-fuxi-signed.zip"
 	if filepath.Base(published.path) != wantName || published.checksum != published.path+".sha256" {
-		t.Fatalf("unexpected signed output: %+v", published)
+		t.Fatalf("unexpected release output: %+v", published)
 	}
 	data, err := os.ReadFile(published.checksum)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(data), "deadbeef  "+wantName+"\n"; got != want {
+	if got, want := string(data), fmt.Sprintf("%x  %s\n", sha256.Sum256(content), wantName); got != want {
 		t.Fatalf("checksum = %q, want %q", got, want)
 	}
 }
@@ -143,7 +148,7 @@ func TestPublishBothReleasePackages(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	packages, err := publishReleasePackages(state, Options{PackageMode: packageModeBoth}, "", "", "")
+	packages, err := publishReleasePackages(state, Options{PackageMode: packageModeBoth})
 	if err != nil {
 		t.Fatal(err)
 	}

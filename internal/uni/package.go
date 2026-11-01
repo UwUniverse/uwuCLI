@@ -5,7 +5,9 @@ package uni
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -193,29 +195,22 @@ func releasePackageName(metadata releasePackageMetadata, signed, fastboot bool) 
 		metadata.version, metadata.date, metadata.releaseType, metadata.device, signing)
 }
 
-func relocateChecksum(source, packagePath string) (string, error) {
-	if source == "" {
-		return writeSigningChecksum(packagePath)
-	}
-	data, err := os.ReadFile(source)
+func writePackageChecksum(path string) (string, error) {
+	input, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	fields := strings.Fields(string(data))
-	if len(fields) == 0 {
-		return "", fmt.Errorf("checksum file is empty: %s", source)
-	}
-	destination := packagePath + ".sha256"
-	line := fmt.Sprintf("%s  %s\n", fields[0], filepath.Base(packagePath))
-	if err := os.WriteFile(destination, []byte(line), 0644); err != nil {
+	defer input.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, input); err != nil {
 		return "", err
 	}
-	if filepath.Clean(source) != filepath.Clean(destination) {
-		if err := os.Remove(source); err != nil {
-			return "", err
-		}
+	checksum := path + ".sha256"
+	line := fmt.Sprintf("%x  %s\n", hash.Sum(nil), filepath.Base(path))
+	if err := os.WriteFile(checksum, []byte(line), 0644); err != nil {
+		return "", err
 	}
-	return destination, nil
+	return checksum, nil
 }
 
 func packageModes(mode string) ([]string, error) {
@@ -233,21 +228,18 @@ func packageModes(mode string) ([]string, error) {
 	}
 }
 
-func publishReleasePackage(state State, mode, signedPackage, checksum string) (publishedPackage, error) {
+func publishReleasePackage(state State, mode string) (publishedPackage, error) {
 	metadata, err := releaseMetadata(state.ProductOut)
 	if err != nil {
 		return publishedPackage{}, err
 	}
 
 	fastboot := mode == packageModeFastboot
-	source := signedPackage
-	if source == "" {
-		suffix := "-ota.zip"
-		if fastboot {
-			suffix = "-img.zip"
-		}
-		source = filepath.Join(state.ProductOut, state.TargetProduct+suffix)
+	suffix := "-ota.zip"
+	if fastboot {
+		suffix = "-img.zip"
 	}
+	source := filepath.Join(state.ProductOut, state.TargetProduct+suffix)
 	info, err := os.Stat(source)
 	if err != nil {
 		return publishedPackage{}, fmt.Errorf("locate built package %s: %w", source, err)
@@ -256,33 +248,27 @@ func publishReleasePackage(state State, mode, signedPackage, checksum string) (p
 		return publishedPackage{}, fmt.Errorf("built package is empty or not a regular file: %s", source)
 	}
 
-	destination := filepath.Join(filepath.Dir(source), releasePackageName(metadata, metadata.signed || signedPackage != "", fastboot))
+	destination := filepath.Join(filepath.Dir(source), releasePackageName(metadata, metadata.signed, fastboot))
 	if filepath.Clean(source) != filepath.Clean(destination) {
 		if err := os.Rename(source, destination); err != nil {
 			return publishedPackage{}, fmt.Errorf("rename release package: %w", err)
 		}
 	}
-	publishedChecksum, err := relocateChecksum(checksum, destination)
+	publishedChecksum, err := writePackageChecksum(destination)
 	if err != nil {
 		return publishedPackage{}, fmt.Errorf("publish release checksum: %w", err)
 	}
 	return publishedPackage{path: destination, checksum: publishedChecksum}, nil
 }
 
-func publishReleasePackages(state State, options Options, signedOTA, signedFastboot, checksum string) ([]publishedPackage, error) {
+func publishReleasePackages(state State, options Options) ([]publishedPackage, error) {
 	modes, err := packageModes(options.PackageMode)
 	if err != nil {
 		return nil, err
 	}
 	packages := make([]publishedPackage, 0, len(modes))
 	for _, mode := range modes {
-		modeSignedPackage, modeChecksum := "", ""
-		if mode == packageModeOTA {
-			modeSignedPackage, modeChecksum = signedOTA, checksum
-		} else if mode == packageModeFastboot {
-			modeSignedPackage = signedFastboot
-		}
-		published, err := publishReleasePackage(state, mode, modeSignedPackage, modeChecksum)
+		published, err := publishReleasePackage(state, mode)
 		if err != nil {
 			return nil, err
 		}
