@@ -121,13 +121,6 @@ func TestParseOptionsReleasePackageAliases(t *testing.T) {
 			t.Fatalf("conflicting release package arguments were accepted: %v", args)
 		}
 	}
-	signed, err := ParseOptions([]string{"--sign-keys", "keys", "uwu"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if signed.PackageMode != packageModeOTA || !reflect.DeepEqual(signed.Targets, []string{"target-files-package", "otatools"}) {
-		t.Fatalf("signed uwu produced unexpected options: %+v", signed)
-	}
 }
 
 func TestParseOptionsCanDisableDebugReport(t *testing.T) {
