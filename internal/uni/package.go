@@ -195,7 +195,7 @@ func releasePackageName(metadata releasePackageMetadata, signed, fastboot bool) 
 
 func relocateChecksum(source, packagePath string) (string, error) {
 	if source == "" {
-		return "", nil
+		return writeSigningChecksum(packagePath)
 	}
 	data, err := os.ReadFile(source)
 	if err != nil {
@@ -264,7 +264,7 @@ func publishReleasePackage(state State, mode, signedPackage, checksum string) (p
 	}
 	publishedChecksum, err := relocateChecksum(checksum, destination)
 	if err != nil {
-		return publishedPackage{}, fmt.Errorf("rename release checksum: %w", err)
+		return publishedPackage{}, fmt.Errorf("publish release checksum: %w", err)
 	}
 	return publishedPackage{path: destination, checksum: publishedChecksum}, nil
 }
