@@ -537,10 +537,6 @@ func Run(ctx context.Context, options Options) error {
 		if err != nil {
 			return fmt.Errorf("load prepared graph: %w", err)
 		}
-		state, err = RecordSourceFingerprint(statePath, top, outDir, state)
-		if err != nil {
-			return fmt.Errorf("record source graph: %w", err)
-		}
 		if err := state.Validate(top, outDir, product); err != nil {
 			return fmt.Errorf("invalid prepared graph: %w", err)
 		}
@@ -642,10 +638,6 @@ func Run(ctx context.Context, options Options) error {
 			state, err = LoadState(statePath)
 			if err != nil {
 				return fmt.Errorf("load refreshed graph: %w", err)
-			}
-			state, err = RecordSourceFingerprint(statePath, top, outDir, state)
-			if err != nil {
-				return fmt.Errorf("record refreshed source graph: %w", err)
 			}
 			if err := loadSchedule("refresh"); err != nil {
 				return err

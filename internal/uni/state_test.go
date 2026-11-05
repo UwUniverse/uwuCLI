@@ -482,7 +482,7 @@ func TestReuseStateChangesTargetAndRestoresBuildDate(t *testing.T) {
 	}
 }
 
-func TestReuseStateRejectsGraphSourceChange(t *testing.T) {
+func TestReuseStateLeavesGraphSourceFreshnessToSoong(t *testing.T) {
 	directory := t.TempDir()
 	outDir := filepath.Join(directory, "out")
 	if err := os.MkdirAll(outDir, 0700); err != nil {
@@ -513,16 +513,19 @@ func TestReuseStateRejectsGraphSourceChange(t *testing.T) {
 	if err := SaveState(statePath, state); err != nil {
 		t.Fatal(err)
 	}
-	_, reused, err := ReuseState(statePath, directory, outDir, "uwu_test", "cp2a", "userdebug", Options{})
+	reusedState, reused, err := ReuseState(statePath, directory, outDir, "uwu_test", "cp2a", "userdebug", Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reused {
-		t.Fatal("changed source graph was reused")
+	if !reused {
+		t.Fatal("uni independently rejected the graph based on its legacy source fingerprint")
+	}
+	if reusedState.SourceFingerprint != "" {
+		t.Fatalf("legacy source fingerprint was retained: %q", reusedState.SourceFingerprint)
 	}
 }
 
-func TestReuseStateRejectsNewGlobSource(t *testing.T) {
+func TestReuseStateAllowsNewGlobSource(t *testing.T) {
 	directory := t.TempDir()
 	outDir := filepath.Join(directory, "out")
 	sourceDir := filepath.Join(directory, "module", "src")
@@ -551,10 +554,6 @@ func TestReuseStateRejectsNewGlobSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fingerprint, _, err := sourceGraphFingerprint(directory, outDir)
-	if err != nil {
-		t.Fatal(err)
-	}
 	statePath := filepath.Join(outDir, "state.json")
 	state := State{
 		Version: stateVersion, SourceRoot: directory, OutDir: outDir,
@@ -564,7 +563,6 @@ func TestReuseStateRejectsNewGlobSource(t *testing.T) {
 			{Path: graph, Size: graphInfo.Size(), ModTimeNano: graphInfo.ModTime().UnixNano()},
 			{Path: buildDate, Size: dateInfo.Size(), ModTimeNano: dateInfo.ModTime().UnixNano()},
 		},
-		SourceFingerprint: fingerprint,
 	}
 	if err := SaveState(statePath, state); err != nil {
 		t.Fatal(err)
@@ -577,12 +575,12 @@ func TestReuseStateRejectsNewGlobSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reused {
-		t.Fatal("graph containing a stale glob result was reused")
+	if !reused {
+		t.Fatal("ordinary glob source addition invalidated uni graph reuse")
 	}
 }
 
-func TestForceReuseStateDoesNotValidateChangedSources(t *testing.T) {
+func TestForceReuseStateAndNormalReuseIgnoreOrdinarySourceChanges(t *testing.T) {
 	directory := t.TempDir()
 	outDir := filepath.Join(directory, "out")
 	sourceDir := filepath.Join(directory, "module", "src")
@@ -619,15 +617,11 @@ func TestForceReuseStateDoesNotValidateChangedSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sourceFingerprint, _, err := sourceGraphFingerprint(directory, outDir)
-	if err != nil {
-		t.Fatal(err)
-	}
 	statePath := filepath.Join(outDir, "state.json")
 	state := State{Version: stateVersion, SourceRoot: directory, OutDir: outDir,
 		TargetProduct: "uwu_test", TargetRelease: "cp2a", BuildVariant: "userdebug",
 		BuildDateTime: "123", BuildDateTimeFile: buildDate, GraphFiles: files,
-		GraphFingerprint: fingerprint, SourceFingerprint: sourceFingerprint}
+		GraphFingerprint: fingerprint, SourceFingerprint: "legacy"}
 	if err := SaveState(statePath, state); err != nil {
 		t.Fatal(err)
 	}
@@ -638,11 +632,11 @@ func TestForceReuseStateDoesNotValidateChangedSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reused || reusedState.SourceFingerprint != sourceFingerprint {
-		t.Fatalf("forced reuse changed the graph source fingerprint: reused=%t fingerprint=%q", reused, reusedState.SourceFingerprint)
+	if !reused || reusedState.SourceFingerprint != "" {
+		t.Fatalf("forced reuse retained legacy source fingerprint: reused=%t fingerprint=%q", reused, reusedState.SourceFingerprint)
 	}
-	if _, reused, err := ReuseState(statePath, directory, outDir, "uwu_test", "cp2a", "userdebug", Options{}); err != nil || reused {
-		t.Fatalf("normal reuse accepted sources bypassed by forced reuse: reused=%t err=%v", reused, err)
+	if _, reused, err := ReuseState(statePath, directory, outDir, "uwu_test", "cp2a", "userdebug", Options{}); err != nil || !reused {
+		t.Fatalf("normal reuse rejected ordinary source changes: reused=%t err=%v", reused, err)
 	}
 }
 

@@ -21,8 +21,6 @@ import (
 
 const stateVersion = 7
 
-const sourceFingerprintVersion = 2
-
 const r8CacheVersion = 1
 
 type R8IndexMode int
@@ -68,7 +66,9 @@ type State struct {
 	Dist              bool        `json:"dist"`
 	GraphFingerprint  string      `json:"graph_fingerprint"`
 	GraphFiles        []GraphFile `json:"graph_files"`
-	SourceFingerprint string      `json:"source_fingerprint,omitempty"`
+	// SourceFingerprint is retained to read older state files, but no longer
+	// participates in graph reuse decisions.
+	SourceFingerprint string `json:"source_fingerprint,omitempty"`
 }
 
 func SaveState(path string, state State) error {
@@ -154,37 +154,35 @@ func (state State) Validate(sourceRoot, outDir, product string) error {
 	return nil
 }
 
-func (state State) validateReusableGraph(sourceRoot, outDir, product string) (int64, error) {
+func (state State) validateReusableGraph(sourceRoot, outDir, product string) error {
 	if state.Version != stateVersion {
-		return 0, fmt.Errorf("unsupported state version %d", state.Version)
+		return fmt.Errorf("unsupported state version %d", state.Version)
 	}
 	if state.BuildDateTime == "" || state.BuildDateTimeFile == "" {
-		return 0, fmt.Errorf("state is missing build date information")
+		return fmt.Errorf("state is missing build date information")
 	}
 	if filepath.Clean(state.SourceRoot) != filepath.Clean(sourceRoot) ||
 		filepath.Clean(state.OutDir) != filepath.Clean(outDir) || state.TargetProduct != product {
-		return 0, fmt.Errorf("build identity changed")
+		return fmt.Errorf("build identity changed")
 	}
-	var oldest int64
+	hasReusableGraph := false
 	for _, expected := range state.GraphFiles {
 		if filepath.Clean(expected.Path) == filepath.Clean(state.BuildDateTimeFile) {
 			continue
 		}
+		hasReusableGraph = true
 		info, err := os.Stat(expected.Path)
 		if err != nil {
-			return 0, err
+			return err
 		}
 		if info.Size() != expected.Size || info.ModTime().UnixNano() != expected.ModTimeNano {
-			return 0, fmt.Errorf("build graph changed")
-		}
-		if oldest == 0 || info.ModTime().UnixNano() < oldest {
-			oldest = info.ModTime().UnixNano()
+			return fmt.Errorf("build graph changed")
 		}
 	}
-	if oldest == 0 {
-		return 0, fmt.Errorf("state has no reusable graph")
+	if !hasReusableGraph {
+		return fmt.Errorf("state has no reusable graph")
 	}
-	return oldest, nil
+	return nil
 }
 
 func currentNinjaTargets(options Options) []string {
@@ -205,19 +203,8 @@ func ReuseState(path, sourceRoot, outDir, product, release, variant string, opti
 		}
 		return State{}, false, err
 	}
-	oldest, err := state.validateReusableGraph(sourceRoot, outDir, product)
+	err = state.validateReusableGraph(sourceRoot, outDir, product)
 	if err != nil || state.TargetRelease != release || state.BuildVariant != variant {
-		return State{}, false, nil
-	}
-	fingerprint, newest, err := sourceGraphFingerprintWithProgress(sourceRoot, outDir, true)
-	if err != nil {
-		return State{}, false, err
-	}
-	if state.SourceFingerprint != "" {
-		if fingerprint != state.SourceFingerprint {
-			return State{}, false, nil
-		}
-	} else if newest > oldest {
 		return State{}, false, nil
 	}
 	// Match Soong's SetupOutDir output exactly; changing this file's mtime
@@ -232,7 +219,7 @@ func ReuseState(path, sourceRoot, outDir, product, release, variant string, opti
 	state.NinjaArgs = currentNinjaTargets(options)
 	state.OriginalArgs = append([]string(nil), options.BuildArgs...)
 	state.Dist = options.Dist
-	state.SourceFingerprint = fingerprint
+	state.SourceFingerprint = ""
 	for index := range state.GraphFiles {
 		info, statErr := os.Stat(state.GraphFiles[index].Path)
 		if statErr != nil {
@@ -252,8 +239,7 @@ func ReuseState(path, sourceRoot, outDir, product, release, variant string, opti
 }
 
 // ForceReuseState skips freshness checks and refreshes graph metadata so a
-// prepared graph can be recovered after lunch or an interrupted analysis. It
-// retains the source fingerprint from the graph generation that was bypassed.
+// prepared graph can be recovered after lunch or an interrupted analysis.
 func ForceReuseState(path, sourceRoot, outDir, product, release, variant string, options Options) (State, bool, error) {
 	if len(options.KeyValues) != 0 {
 		return State{}, false, fmt.Errorf("--force-reuse cannot be combined with product variable overrides")
@@ -276,6 +262,7 @@ func ForceReuseState(path, sourceRoot, outDir, product, release, variant string,
 	state.NinjaArgs = currentNinjaTargets(options)
 	state.OriginalArgs = append([]string(nil), options.BuildArgs...)
 	state.Dist = options.Dist
+	state.SourceFingerprint = ""
 	for index := range state.GraphFiles {
 		info, statErr := os.Stat(state.GraphFiles[index].Path)
 		if statErr != nil {
@@ -292,18 +279,6 @@ func ForceReuseState(path, sourceRoot, outDir, product, release, variant string,
 		return State{}, false, err
 	}
 	return state, true, nil
-}
-
-func RecordSourceFingerprint(path, sourceRoot, outDir string, state State) (State, error) {
-	fingerprint, _, err := sourceGraphFingerprintWithProgress(sourceRoot, outDir, true)
-	if err != nil {
-		return State{}, err
-	}
-	state.SourceFingerprint = fingerprint
-	if err := SaveState(path, state); err != nil {
-		return State{}, err
-	}
-	return state, nil
 }
 
 func ProductTargets(state State) []string {
