@@ -55,7 +55,9 @@ type TelemetrySample struct {
 	Timestamp       time.Time
 	Elapsed         time.Duration
 	RootPID         int
+	MemoryTotal     int64
 	MemoryAvailable int64
+	SwapTotal       int64
 	SwapFree        int64
 	SwapInBytes     uint64
 	SwapOutBytes    uint64
@@ -75,6 +77,8 @@ type TelemetrySample struct {
 	Kotlinc         int
 	Rustc           int
 	Clang           int
+	ClangC           int
+	ClangCXX         int
 	DiskAvailable   int64
 	CPUFreqMinKHz   int64
 	CPUFreqAvgKHz   int64
@@ -329,7 +333,7 @@ func classifyBuildProcess(command []byte, fallback string) (string, string) {
 		case lowerName == "rustc":
 			return name, "rustc"
 		case lowerName == "clang" || lowerName == "clang++":
-			return name, "clang"
+			return name, clangTaskType(command, lowerName)
 		case lowerName == "ld" || lowerName == "ld.lld" || lowerName == "lld":
 			return name, "linker"
 		default:
@@ -377,6 +381,41 @@ func classifyBuildProcess(command []byte, fallback string) (string, string) {
 	default:
 		return name, "other"
 	}
+}
+
+func clangTaskType(command []byte, executable string) string {
+	if executable == "clang++" {
+		return "clang-cxx"
+	}
+	arguments := bytes.Split(command, []byte{0})
+	for index, argument := range arguments {
+		value := strings.ToLower(string(argument))
+		if value == "-x" && index+1 < len(arguments) {
+			language := strings.ToLower(string(arguments[index+1]))
+			if strings.Contains(language, "c++") || strings.Contains(language, "objective-c++") {
+				return "clang-cxx"
+			}
+			if language == "c" || language == "objective-c" {
+				return "clang-c"
+			}
+		}
+		if strings.HasPrefix(value, "-x") {
+			language := strings.TrimPrefix(value, "-x")
+			if strings.Contains(language, "c++") || strings.Contains(language, "objective-c++") {
+				return "clang-cxx"
+			}
+			if language == "c" || language == "objective-c" {
+				return "clang-c"
+			}
+		}
+		switch strings.ToLower(filepath.Ext(value)) {
+		case ".cc", ".cpp", ".cxx", ".c++", ".mm", ".mpp":
+			return "clang-cxx"
+		case ".c", ".m":
+			return "clang-c"
+		}
+	}
+	return "clang-c"
 }
 
 func readProcessTelemetry(identity processIdentity) (processTelemetry, error) {
@@ -437,6 +476,18 @@ func readTelemetryPoint(root processIdentity, outDir string, detailed bool) (tel
 	} else {
 		point.cpuOK = true
 	}
+	point.load, err = readLoadSnapshot()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("read load telemetry: %w", err))
+	} else {
+		point.loadOK = true
+	}
+	point.diskFree, err = readDiskAvailable(outDir)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("read output disk telemetry: %w", err))
+	} else {
+		point.diskOK = true
+	}
 	if detailed {
 		point.cpuPSI, err = readPSI("/proc/pressure/cpu")
 		if err != nil {
@@ -449,18 +500,6 @@ func readTelemetryPoint(root processIdentity, outDir string, detailed bool) (tel
 			errs = append(errs, fmt.Errorf("read IO PSI: %w", err))
 		} else {
 			point.ioPSIOK = true
-		}
-		point.load, err = readLoadSnapshot()
-		if err != nil {
-			errs = append(errs, fmt.Errorf("read load telemetry: %w", err))
-		} else {
-			point.loadOK = true
-		}
-		point.diskFree, err = readDiskAvailable(outDir)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("read output disk telemetry: %w", err))
-		} else {
-			point.diskOK = true
 		}
 		point.cpuFreqMin, point.cpuFreqAvg, point.cpuFreqMax = readCPUFrequencySnapshot()
 	}
@@ -557,28 +596,35 @@ func (monitor *memoryMonitor) record(forceReport bool) {
 	for taskType, count := range counts {
 		monitor.maxCounts[taskType] = max(monitor.maxCounts[taskType], count)
 	}
+	clangCount := counts["clang"] + counts["clang-c"] + counts["clang-cxx"]
+	monitor.maxCounts["clang"] = max(monitor.maxCounts["clang"], clangCount)
 	reportSample := TelemetrySample{
 		Timestamp: point.at, Elapsed: point.at.Sub(monitor.started), RootPID: monitor.root.PID,
 		CPUPercent: cpuPercent, IOWaitPercent: ioWaitPercent, Load: point.load,
 		MemoryPSI: point.psi, CPUPSI: point.cpuPSI, IOPSI: point.ioPSI,
 		Processes: len(point.processes), TrackedRSS: trackedRSS,
 		R8: counts["r8"], Linker: counts["linker"], Javac: counts["javac"],
-		Kotlinc: counts["kotlinc"], Rustc: counts["rustc"], Clang: counts["clang"],
+		Kotlinc: counts["kotlinc"], Rustc: counts["rustc"], Clang: clangCount,
+		ClangC: counts["clang-c"], ClangCXX: counts["clang-cxx"],
 		CPUFreqMinKHz: point.cpuFreqMin, CPUFreqAvgKHz: point.cpuFreqAvg, CPUFreqMaxKHz: point.cpuFreqMax,
 	}
 	if shouldReport {
 		if point.memoryOK {
-			reportSample.MemoryAvailable = point.memory.Available
-			reportSample.SwapFree = point.memory.SwapFree
 			reportSample.SwapInBytes = counterDelta(point.memory.SwapInPage, monitor.baseSwapIn) * uint64(os.Getpagesize())
 			reportSample.SwapOutBytes = counterDelta(point.memory.SwapOutPage, monitor.baseSwapOut) * uint64(os.Getpagesize())
 			reportSample.MajorFaults = counterDelta(point.memory.MajorFaults, monitor.initialMemory.MajorFaults)
 			reportSample.OOMKills = counterDelta(point.memory.OOMKills, monitor.initialMemory.OOMKills)
 		}
-		if point.diskOK {
-			reportSample.DiskAvailable = point.diskFree
-		}
 		monitor.lastReported = point.at
+	}
+	if point.memoryOK {
+		reportSample.MemoryTotal = point.memory.Total
+		reportSample.MemoryAvailable = point.memory.Available
+		reportSample.SwapTotal = point.memory.SwapTotal
+		reportSample.SwapFree = point.memory.SwapFree
+	}
+	if point.diskOK {
+		reportSample.DiskAvailable = point.diskFree
 	}
 	monitor.previous = point
 	monitor.havePrevious = true
@@ -606,9 +652,11 @@ func (monitor *memoryMonitor) updateLiveTasks() {
 		_, taskType := classifyBuildProcess(command, strings.TrimSpace(string(comm)))
 		counts[taskType]++
 	}
+	clangCount := counts["clang"] + counts["clang-c"] + counts["clang-cxx"]
 	monitor.liveSink(TelemetrySample{
 		R8: counts["r8"], Linker: counts["linker"], Javac: counts["javac"],
-		Kotlinc: counts["kotlinc"], Rustc: counts["rustc"], Clang: counts["clang"],
+		Kotlinc: counts["kotlinc"], Rustc: counts["rustc"], Clang: clangCount,
+		ClangC: counts["clang-c"], ClangCXX: counts["clang-cxx"],
 	})
 }
 

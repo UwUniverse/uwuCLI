@@ -514,16 +514,23 @@ func Run(ctx context.Context, options Options) error {
 	var state State
 	var reused bool
 	stepStarted = time.Now()
-	fmt.Println("uni: startup: checking whether the prepared graph can be reused")
 	if options.ForceReuse {
+		fmt.Println("uni: startup: forcing reuse of the prepared graph")
 		state, reused, err = ForceReuseState(statePath, top, outDir, product, release, variant, options)
 	} else {
-		state, reused, err = ReuseState(statePath, top, outDir, product, release, variant, options)
+		// Always enter Soong prepare so its bootstrap, environment, and glob
+		// checks can decide whether graph analysis is actually needed. Reusing
+		// this graph directly would bypass those checks.
+		reused = false
 	}
 	if err != nil {
 		return fmt.Errorf("reuse prepared graph: %w", err)
 	}
-	fmt.Printf("uni: startup: graph reuse check finished in %s (reused=%t)\n", time.Since(stepStarted).Round(time.Millisecond), reused)
+	if options.ForceReuse {
+		fmt.Printf("uni: startup: forced graph reuse check finished in %s (reused=%t)\n", time.Since(stepStarted).Round(time.Millisecond), reused)
+	} else {
+		fmt.Println("uni: startup: Soong will validate the prepared graph")
+	}
 	graphArgs := prepareArgs(options, jobs)
 	if reused {
 		fmt.Printf("uni: reuse graph\n")

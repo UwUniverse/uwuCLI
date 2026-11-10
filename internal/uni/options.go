@@ -33,6 +33,7 @@ type Options struct {
 	DevAuto         bool
 	DevAutoSet      bool
 	Plan            bool
+	Preview         bool
 	Help            bool
 	FullBuild       bool
 	Dist            bool
@@ -75,6 +76,7 @@ func Usage() string {
 const usageEnglish = `Usage: uni [options] [targets...]
 
 Options:
+  --preview            Show the uni interface without running a build
   -j N, -jN            Run up to N jobs in parallel
   -k N, -kN            Keep going until N jobs fail; -k means no limit
   -l N, -lN            Start jobs only while load average is below N
@@ -105,6 +107,7 @@ Release targets:
   uwu-f                Build updatepackage and publish an uwuAOSP-named fastboot package
 
 Examples:
+  uni --preview
   uni
   uni -j8 otapackage
   uni -j12 uwu
@@ -117,6 +120,7 @@ Examples:
 const usageChinese = `用法: uni [选项] [目标...]
 
 选项:
+  --preview            仅预览 uni 界面，不执行构建
   -j N, -jN            最多并行执行 N 个任务
   -k N, -kN            失败 N 个任务后停止；-k 表示不限制
   -l N, -lN            系统负载低于 N 时才启动新任务
@@ -260,6 +264,9 @@ func ParseOptions(args []string) (Options, error) {
 			return Options{}, fmt.Errorf("%s was renamed to %s", legacyName, replacement)
 		}
 		switch arg {
+		case "--preview":
+			options.Preview = true
+			continue
 		case "-h", "-help", "--help":
 			options.Help = true
 			continue
@@ -481,6 +488,12 @@ func ParseOptions(args []string) (Options, error) {
 			continue
 		}
 		options.Targets = append(options.Targets, arg)
+	}
+	if options.Preview {
+		if len(options.RawArgs) != 1 {
+			return Options{}, fmt.Errorf("--preview cannot be combined with other arguments")
+		}
+		return options, nil
 	}
 
 	if options.CleanLogs && len(options.BuildArgs) > 0 {

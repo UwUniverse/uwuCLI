@@ -121,25 +121,35 @@ func TestCompactDisplayLinePreservesColorsAndProgress(t *testing.T) {
 	tui.phaseStarted("graph-analysis", 12)
 	tui.consume("\x1b[32m[100% 1/1] bootstrap blueprint\x1b[0m")
 	frame := tui.frame(true)
-	if !strings.Contains(frame, "\x1b[32m[100% 1/1] bootstrap blueprint\x1b[0m") {
-		t.Fatalf("frame lost colored progress line: %q", frame)
+	if strings.Contains(frame, "\x1b[32m[100% 1/1] bootstrap blueprint\x1b[0m") {
+		t.Fatalf("compact view should not duplicate the latest output line: %q", frame)
 	}
-	if !strings.Contains(frame, "  \x1b[32m") {
-		t.Fatalf("latest output line is missing from the TUI page: %q", frame)
+	tui.details = true
+	if frame := tui.frame(true); !strings.Contains(frame, "\x1b[32m[100% 1/1] bootstrap blueprint\x1b[0m") {
+		t.Fatalf("detailed view is missing the task log line: %q", frame)
 	}
 }
 
-func TestCompactTUIR8Status(t *testing.T) {
+func TestCompactTUIBuildPanelKeepsFixedCompilerRows(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
 	idle := tui.frame(true)
-	if !strings.Contains(sanitizeCompactLine(idle), "R8        □ idle") || strings.Contains(idle, "0 running") {
-		t.Fatalf("idle R8 status is misleading: %q", idle)
+	plainIdle := sanitizeCompactLine(idle)
+	for _, label := range []string{"C++", "C", "Kotlin", "Java", "Rust", "R8"} {
+		if !strings.Contains(plainIdle, label) {
+			t.Fatalf("fixed build panel row %q is missing: %q", label, plainIdle)
+		}
+	}
+	if strings.Contains(compactActivity(TelemetrySample{R8: 3}), "R8") {
+		t.Fatalf("R8 should not appear in current task activity")
 	}
 
-	tui.updateTelemetry(TelemetrySample{R8: 3})
+	tui.updateTelemetry(TelemetrySample{R8: 3, ClangC: 2, ClangCXX: 7, Kotlinc: 4})
 	active := tui.frame(true)
-	if !strings.Contains(sanitizeCompactLine(active), "R8        3 running") {
-		t.Fatalf("active R8 status is missing: %q", active)
+	plainActive := sanitizeCompactLine(active)
+	for _, counter := range []string{"C++      7", "C        2", "Kotlin   4", "R8       3"} {
+		if !strings.Contains(plainActive, counter) {
+			t.Fatalf("build panel counter %q is missing: %q", counter, plainActive)
+		}
 	}
 }
 
@@ -179,10 +189,10 @@ func TestCompactTUIShowsSemanticColorsAndETA(t *testing.T) {
 	tui.byName["Main"].started = time.Now().Add(-20 * time.Second)
 	tui.consume("[ 79% 15175/19054 4m2s remaining] target")
 	frame := tui.frame(true)
-	if !strings.Contains(frame, "\x1b[1;36m  Main") ||
-		strings.Contains(frame, "\x1b[38;2;") ||
-		!strings.Contains(frame, "eta 4m2s") {
-		t.Fatalf("task row should keep its original styling and ETA without temperature color: %q", frame)
+	if !strings.Contains(frame, "\x1b[1;38;2;118;177;255m  Main") ||
+		strings.Contains(frame, "\x1b[1;36m") ||
+		!strings.Contains(sanitizeCompactLine(frame), "4m2s remaining") {
+		t.Fatalf("compact task row or detailed progress summary is missing: %q", frame)
 	}
 	tui.phaseFinished("ninja", nil)
 	if frame := tui.frame(true); !strings.Contains(frame, "\x1b[32m") {
@@ -216,11 +226,10 @@ func TestCompactTUIShowsStructuredRunningActionsAndElapsedTime(t *testing.T) {
 		t.Fatalf("structured action details missing from frame: %q", frame)
 	}
 	pageLines := strings.Split(frame, "\n")
-	if len(pageLines) != 24 || strings.Trim(pageLines[16], "=") != "" ||
-		!strings.Contains(pageLines[17], "[  0% 0/23") ||
-		!strings.Contains(pageLines[18], "compile framework component") ||
+	if len(pageLines) != 24 || !strings.Contains(pageLines[16], "[  0% 0/23") ||
+		!strings.Contains(pageLines[17], "compile framework component") ||
 		!strings.Contains(pageLines[23], "Ctrl+C Stop") {
-		t.Fatalf("bottom pane order should be divider, status, tasks, controls: %q", frame)
+		t.Fatalf("bottom pane order should be progress, tasks, controls: %q", frame)
 	}
 	tui.color = true
 	frame = tui.frame(true)
@@ -234,7 +243,7 @@ func TestCompactTUIShowsStructuredRunningActionsAndElapsedTime(t *testing.T) {
 		StartedUnixNano: time.Now().UnixNano(),
 	}, 1)
 	styleFrame := styleTUI.frame(true)
-	for _, style := range []string{"\x1b[1;36mR8\x1b[0m", "\x1b[1;36m"} {
+	for _, style := range []string{"\x1b[1;38;2;118;177;255mC++", "\x1b[1;38;2;118;177;255m"} {
 		if !strings.Contains(styleFrame, style) {
 			t.Errorf("expected bold/color emphasis %q in frame: %q", style, styleFrame)
 		}
@@ -298,7 +307,8 @@ func TestCompactActivityUsesCurrentCompilerClass(t *testing.T) {
 		sample TelemetrySample
 		want   string
 	}{
-		{name: "r8", sample: TelemetrySample{R8: 2, Linker: 1}, want: "R8=2"},
+		{name: "r8", sample: TelemetrySample{R8: 2}, want: ""},
+		{name: "r8 with linker", sample: TelemetrySample{R8: 2, Linker: 1}, want: "link=1"},
 		{name: "linker", sample: TelemetrySample{Linker: 1, Clang: 8}, want: "link=1"},
 		{name: "kotlin", sample: TelemetrySample{Kotlinc: 3}, want: "Kotlin=3"},
 		{name: "java", sample: TelemetrySample{Javac: 7}, want: "Java=7"},
@@ -312,6 +322,21 @@ func TestCompactActivityUsesCurrentCompilerClass(t *testing.T) {
 				t.Fatalf("activity=%q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestCompactProgressSummaryOmitsLinkActivity(t *testing.T) {
+	tui := newCompactTUI(nil, nil)
+	task := tui.byName["Main"]
+	task.status = compactTaskRunning
+	task.activity = "link=1"
+	tui.active = task
+	rows := compactActionPane(tui, 3, 80, 77)
+	if strings.Contains(sanitizeCompactLine(rows[0]), "link=1") {
+		t.Fatalf("one-line progress summary should omit linker activity: %q", rows[0])
+	}
+	if !strings.Contains(tui.taskLine(task), "link=1") {
+		t.Fatalf("compiler activity should remain in the task list")
 	}
 }
 
@@ -542,7 +567,7 @@ func TestCompactTUIRenderDoesNotScrollOnRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(data), "\x1b[1;16r") != 2 || strings.Count(string(data), "\x1b[1;1H") < 2 {
+	if strings.Count(string(data), "\x1b[17;24r") != 2 || strings.Count(string(data), "\x1b[24;1H") != 2 || strings.Count(string(data), "\x1b[1;1H") < 2 {
 		t.Fatalf("refresh did not redraw the pinned full-screen layout: %q", data)
 	}
 }
@@ -553,8 +578,8 @@ func TestCompactActionPaneScalesWithTerminalHeight(t *testing.T) {
 			t.Errorf("pane height for %d rows = %d, want %d", rows, got, want)
 		}
 	}
-	if got := compactActionPaneHeight(24) - 3; got != 5 {
-		t.Fatalf("24-row terminal exposes %d task rows, want minimum of 5", got)
+	if got := compactActionPaneHeight(24) - 2; got != 6 {
+		t.Fatalf("24-row terminal exposes %d task rows, want 6", got)
 	}
 }
 
@@ -566,18 +591,18 @@ func TestCompactActionPaneColorsElapsedTimersOnly(t *testing.T) {
 		{description: "red target", started: time.Now().Add(-61 * time.Second)},
 	}
 	rows := compactActionPane(tui, 5, 80, 77)
-	if !strings.Contains(rows[2], "\x1b[38;2;") || !strings.Contains(rows[2], "m 0:31 \x1b[0m") || !strings.Contains(rows[2], "yellow target") {
+	if !strings.Contains(rows[1], "\x1b[38;2;") || !strings.Contains(rows[1], "m 0:31 \x1b[0m") || !strings.Contains(rows[1], "yellow target") {
+		t.Fatalf("elapsed-time temperature is missing: %q", rows[1])
+	}
+	if !strings.Contains(rows[2], "\x1b[38;2;") || !strings.Contains(rows[2], "m 1:01 \x1b[0m") || !strings.Contains(rows[2], "red target") {
 		t.Fatalf("elapsed-time temperature is missing: %q", rows[2])
 	}
-	if !strings.Contains(rows[3], "\x1b[38;2;") || !strings.Contains(rows[3], "m 1:01 \x1b[0m") || !strings.Contains(rows[3], "red target") {
-		t.Fatalf("elapsed-time temperature is missing: %q", rows[3])
-	}
-	if strings.Contains(strings.Split(rows[2], "\x1b[0m")[1], "\x1b[") ||
-		strings.Contains(strings.Split(rows[3], "\x1b[0m")[1], "\x1b[") {
+	if strings.Contains(strings.Split(rows[1], "\x1b[0m")[1], "\x1b[") ||
+		strings.Contains(strings.Split(rows[2], "\x1b[0m")[1], "\x1b[") {
 		t.Fatal("action descriptions should remain uncolored after the elapsed-time emphasis")
 	}
-	if len(rows[0]) != 80 || !strings.Contains(rows[4], "Ctrl+C Stop") {
-		t.Fatalf("full-width divider or bottom operation bar missing: %q", rows)
+	if !strings.Contains(rows[0], "pending") || !strings.Contains(rows[4], "Ctrl+C Stop") {
+		t.Fatalf("progress row or bottom operation bar missing: %q", rows)
 	}
 }
 
@@ -587,15 +612,15 @@ func TestCompactActionPaneShowsStartupLogsUntilActionsStart(t *testing.T) {
 	tui.consume("uni: startup: checking for leftover build processes")
 	tui.consume("uni: startup: process check finished in 9ms")
 	rows := compactActionPane(tui, 5, 100, 97)
-	if !strings.Contains(rows[2], "uni: startup: checking for leftover build processes") ||
-		!strings.Contains(rows[3], "uni: startup: process check finished in 9ms") {
+	if !strings.Contains(rows[1], "uni: startup: checking for leftover build processes") ||
+		!strings.Contains(rows[2], "uni: startup: process check finished in 9ms") {
 		t.Fatalf("startup logs are missing or out of order below the divider: %q", rows)
 	}
 
 	tui.consumeStatusEvent(compactStatusEvent{Type: "start", ID: 1, Description: "compile Kotlin"}, 1)
 	rows = compactActionPane(tui, 5, 100, 97)
 	if strings.Contains(strings.Join(rows, "\n"), "uni: startup:") ||
-		!strings.Contains(sanitizeCompactLine(rows[2]), "compile Kotlin") {
+		!strings.Contains(sanitizeCompactLine(rows[1]), "compile Kotlin") {
 		t.Fatalf("startup logs were not replaced by live action status: %q", rows)
 	}
 }
@@ -605,12 +630,12 @@ func TestCompactActionPaneStatusRowIsUnindentedAndBoldWithoutColor(t *testing.T)
 	tui.color = false
 	tui.phaseStarted("ninja", 8)
 	rows := compactActionPane(tui, 3, 80, 77)
-	plain := sanitizeCompactLine(rows[1])
+	plain := sanitizeCompactLine(rows[0])
 	if strings.HasPrefix(plain, " ") {
-		t.Fatalf("status row has leading indentation: %q", rows[1])
+		t.Fatalf("status row has leading indentation: %q", rows[0])
 	}
-	if !strings.HasPrefix(rows[1], "\x1b[1m") || !strings.Contains(plain, tui.messages.building) {
-		t.Fatalf("status row should remain bold without color: %q", rows[1])
+	if !strings.HasPrefix(rows[0], "\x1b[1m") || !strings.Contains(plain, tui.messages.building) {
+		t.Fatalf("status row should remain bold without color: %q", rows[0])
 	}
 }
 
@@ -625,17 +650,12 @@ func TestCompactSoongProgressLineMatchesMFormat(t *testing.T) {
 
 func TestCompactTUIFrameReservesTerminalColumn(t *testing.T) {
 	tui := newCompactTUI(nil, nil)
+	tui.color = true
 	tui.phaseStarted("graph-analysis", 18)
 	tui.consume("[ 96% 302/312] " + strings.Repeat("module/", 30))
 	frame := tui.frame(true)
 	for _, line := range strings.Split(strings.TrimSuffix(frame, "\n"), "\n") {
 		lineWidth := compactTextWidth(sanitizeCompactLine(line))
-		if line != "" && strings.Trim(line, "=") == "" {
-			if lineWidth != 100 {
-				t.Fatalf("separator width=%d, want 100 columns: %q", lineWidth, line)
-			}
-			continue
-		}
 		if lineWidth >= 100 {
 			t.Fatalf("frame line can wrap at terminal width: %q", line)
 		}

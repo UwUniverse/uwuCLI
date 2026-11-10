@@ -12,7 +12,7 @@ import (
 
 func TestClassifyBuildProcess(t *testing.T) {
 	tests := map[string]string{
-		"/tool/clang++\x00-c\x00a.cc\x00":                                       "clang",
+		"/tool/clang++\x00-c\x00a.cc\x00":                                       "clang-cxx",
 		"/tool/ld.lld\x00-o\x00lib.so\x00":                                      "linker",
 		"java\x00com.android.tools.r8.R8\x00":                                   "r8",
 		"java\x00-cp\x00/tool/d8.jar\x00com.android.tools.r8.D8\x00":            "r8",
